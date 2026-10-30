@@ -102,6 +102,28 @@
       <p><button id="speedbtn">Run speed test</button> <span id="speed" class="sub"></span></p>
     </section>
   </div>
+
+  <section class="card" style="margin-top:12px">
+    <div class="controls">
+      <h2 id="devtitle">Devices</h2>
+      <button data-sort="rtt" aria-pressed="true">Slowest first</button>
+      <button data-sort="name">By name</button>
+      <button data-sort="ip">By address</button>
+    </div>
+    <p class="sub" style="margin:0 0 8px">Checked every minute. "Response" is how long each device takes to answer — on wifi devices, slow or jumpy numbers mean a weak signal or a struggling wifi point. Phones and tablets nap to save battery, so they often look slow when idle; judge them while in use.</p>
+    <div style="overflow-x:auto"><table id="devices"></table></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h3>Comings &amp; goings</h3>
+      <div id="events" class="sub">Nothing yet — devices joining or leaving will appear here.</div>
+    </section>
+    <section class="card">
+      <h3>What Heimdall can and can't see</h3>
+      <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses — your router keeps that to itself. For per-device data use, open the Google Home app → Wifi → Devices.</p>
+    </section>
+  </div>
 </main>
 <script>
 const SERIES = [
@@ -169,7 +191,39 @@ function render() {
   const sp = data.speed;
   $("speed").textContent = data.speed_running ? "testing…" : sp?.mbps ? `${sp.mbps} Mbps download at ${new Date(sp.at * 1000).toLocaleTimeString()}` : sp?.error ? "test failed" : "";
   $("speedbtn").disabled = data.speed_running;
+  renderDevices();
 }
+
+let devSort = "rtt";
+const ipNum = ip => ip.split(".").reduce((a, b) => a * 256 + +b, 0);
+const ago = t => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+function renderDevices() {
+  const devs = (data.devices || []).map(d => {
+    const a = d.rtt.map(r => r[1]), mx = d.rtt.map(r => r[2]);
+    return { ...d, med: pct(a, .5), worst: mx.length ? Math.max(...mx) : null };
+  });
+  const online = devs.filter(d => d.online).length;
+  $("devtitle").textContent = data.last_scan ? `Devices — ${online} switched on` : "Devices — first scan running…";
+  const key = { rtt: (a, b) => b.online - a.online || (b.med ?? -1) - (a.med ?? -1),
+                name: (a, b) => (a.name || "~").localeCompare(b.name || "~"),
+                ip: (a, b) => ipNum(a.ip) - ipNum(b.ip) }[devSort];
+  devs.sort(key);
+  const t = { good: 15, warn: 50, bad: 150 };
+  $("devices").innerHTML = `<tr><th>Device</th><th>Type</th><th>Address</th><th>Response (typical)</th><th>Worst</th><th>Seen</th></tr>` +
+    devs.map(d => `<tr${d.online ? "" : ' style="opacity:.55"'}>
+      <td>${d.name || "<span class='sub'>(no name)</span>"}</td>
+      <td>${d.kind}</td><td>${d.ip}</td>
+      <td>${d.online ? `${fmt(d.med)} ms ${badge(level(d.med, t))}` : "offline"}</td>
+      <td>${fmt(d.worst)} ms</td><td>${d.online ? "online" : "left " + ago(d.last)}</td></tr>`).join("");
+  const ev = (data.events || []).slice(-30).reverse();
+  if (ev.length) $("events").innerHTML = ev.map(e =>
+    `<div>${new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} — <b>${e.name || e.ip}</b> ${e.what}</div>`).join("");
+}
+document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => {
+  devSort = b.dataset.sort;
+  document.querySelectorAll("[data-sort]").forEach(o => o.setAttribute("aria-pressed", o === b));
+  renderDevices();
+});
 
 let geom = null;
 function drawChart(since, now) {
