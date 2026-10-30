@@ -14,4 +14,21 @@ python3 server.py
 ```
 
 Then open http://localhost:8765. No installs needed (Python 3 standard library only).
-Set `ROUTER=192.168.x.1` if your router address is different.
+Set `ROUTER=192.168.x.1` if your router address is different, and `PORT=...` to change the port.
+
+Once a minute it also sweeps the network and lists every device that answers,
+how quickly each responds, and when devices join or leave. It cannot see what
+other devices are doing online - only that they're there and how responsive
+they are.
+
+## Run it on a home server as heimdall.local (Ubuntu)
+
+```sh
+git clone https://github.com/anipatke/heimdall.git && cd heimdall
+sudo apt install avahi-utils             # lets other devices find heimdall.local
+avahi-publish -a -R heimdall.local "$(hostname -I | awk '{print $1}')" &
+sudo PORT=80 python3 server.py           # port 80 so the address needs no :8765
+```
+
+Then open http://heimdall.local from any device at home. Best results when
+the server is plugged into the main router by cable.

@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """Heimdall - home network lag watcher. Run: python3 server.py, then open http://localhost:8765"""
 import json, os, random, re, socket, struct, subprocess, threading, time, csv
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import urlopen
 
-PORT = 8765
+PORT = int(os.environ.get("PORT", 8765))
 ROUTER = os.environ.get("ROUTER", "192.168.86.1")
+SUBNET = ROUTER.rsplit(".", 1)[0]  # assumes a /24 home network
+SCAN_EVERY = 60
+_s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_s.connect((ROUTER, 9))  # no packet sent; just picks the address we'd reach the router from
+MY_IP = _s.getsockname()[0]
+_s.close()
+# (pattern in the device's network name, friendly type) - first match wins
+KINDS = [(r"nest-wifi-point|google-wifi", "Wifi point"), (r"google-home|nest-(mini|audio|hub)", "Smart speaker"),
+         (r"sonos", "Sonos speaker"), (r"^esp_|tasmota|shelly", "Smart-home gadget"),
+         (r"pixel|iphone|android|galaxy|oneplus|note\d|-s\d\d|-a\d\d", "Phone"), (r"ipad|tab", "Tablet"),
+         (r"tizen|webos|roku|chromecast|tv", "TV"), (r"^brw|printer|epson|canon|^hp", "Printer"),
+         (r"laundry|washer|dryer|fridge|dishwasher", "Appliance"), (r"macbook|laptop|desktop|pc", "Computer")]
 TARGETS = {"router": ROUTER, "cloudflare": "1.1.1.1", "google": "8.8.8.8"}
 DNS_NAMES = ["google.com", "netflix.com", "amazon.com", "bbc.co.uk", "github.com", "reddit.com", "spotify.com"]
 KEEP = 3600  # seconds of history held in memory
@@ -14,7 +27,9 @@ LOG = os.path.join(HERE, "log.csv")
 
 lock = threading.Lock()
 samples = []          # {t, kind, value(ms or None)}
-state = {"wifi": None, "speed": None, "speed_running": False}
+state = {"wifi": None, "speed": None, "speed_running": False, "last_scan": None}
+devices = {}          # ip -> {name, mac, kind, first, last, online, rtt: [(t, avg, max)]}
+events = []           # {t, ip, name, what: joined|left}
 
 
 def record(kind, value):
@@ -79,6 +94,59 @@ def wifi_loop():
         time.sleep(10)
 
 
+def probe(ip):
+    """Ping a device a few times; returns (avg_ms, max_ms) or None if it didn't answer."""
+    out = subprocess.run(["ping", "-n", "-q", "-c", "4", "-i", "0.25", "-W", "1", ip],
+                         capture_output=True, text=True).stdout
+    m = re.search(r"= [\d.]+/([\d.]+)/([\d.]+)", out)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+def kind_of(ip, name):
+    if ip == ROUTER:
+        return "Router"
+    if ip == MY_IP:
+        return "Heimdall (this machine)"
+    for pat, kind in KINDS:
+        if re.search(pat, name or "", re.I):
+            return kind
+    return "Unknown"
+
+
+def scan_loop():
+    while True:
+        now = time.time()
+        with ThreadPoolExecutor(64) as pool:
+            ips = [f"{SUBNET}.{i}" for i in range(1, 255)]
+            results = dict(zip(ips, pool.map(probe, ips)))
+        macs = dict(re.findall(r"^(\S+) .*lladdr (\S+)", subprocess.run(["ip", "neigh"], capture_output=True, text=True).stdout, re.M))
+        with lock:
+            for ip, r in results.items():
+                d = devices.get(ip)
+                if r is None:
+                    # one missed scan can be a sleepy phone; call it gone after two
+                    if d and d["online"] and now - d["last"] > SCAN_EVERY * 1.5:
+                        d["online"] = False
+                        events.append({"t": now, "ip": ip, "name": d["name"], "what": "left"})
+                    continue
+                if not d:
+                    try:
+                        name = socket.gethostbyaddr(ip)[0].removesuffix(".lan")
+                    except OSError:
+                        name = ""
+                    d = devices[ip] = {"ip": ip, "name": name, "kind": kind_of(ip, name), "first": now, "rtt": [], "online": False}
+                if not d["online"]:
+                    d["online"] = True
+                    if state["last_scan"]:  # don't flood the feed on the very first scan
+                        events.append({"t": now, "ip": ip, "name": d["name"], "what": "joined"})
+                d["last"] = now
+                d["mac"] = macs.get(ip, d.get("mac"))
+                d["rtt"] = (d["rtt"] + [(now, *r)])[-60:]
+            del events[:-200]
+            state["last_scan"] = now
+        time.sleep(max(0, SCAN_EVERY - (time.time() - now)))
+
+
 def speed_test():
     state["speed_running"] = True
     try:
@@ -108,7 +176,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/data"):
             with lock:
                 data = list(samples)
-            self.send(json.dumps({"samples": data, "targets": TARGETS, **state}).encode(), "application/json")
+                devs = [dict(d) for d in devices.values()]
+                evs = list(events)
+            self.send(json.dumps({"samples": data, "targets": TARGETS, "devices": devs, "events": evs,
+                                  "host": socket.gethostname(), **state}).encode(), "application/json")
         elif self.path == "/speedtest":
             if not state["speed_running"]:
                 threading.Thread(target=speed_test, daemon=True).start()
@@ -123,5 +194,6 @@ if __name__ == "__main__":
         threading.Thread(target=pinger, args=(n, h), daemon=True).start()
     threading.Thread(target=dns_loop, daemon=True).start()
     threading.Thread(target=wifi_loop, daemon=True).start()
+    threading.Thread(target=scan_loop, daemon=True).start()
     print(f"Dashboard: http://localhost:{PORT}  (log: {LOG})")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
