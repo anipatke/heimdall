@@ -39,7 +39,8 @@
   .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
   .status i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
   .headline { font-size: 17px; font-weight: 600; margin: 0 0 10px; }
-  .areas { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 20px; }
+  .areas { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  .area { background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
   .area .name { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
   .area p { margin: 3px 0 0; color: var(--text-secondary); font-size: 13px; }
   @media (max-width: 640px) {
@@ -49,7 +50,7 @@
     header .sub { display: none; }
     .headline { font-size: 16px; }
     .areas { grid-template-columns: 1fr; gap: 0; }
-    .area { padding: 9px 0; border-top: 1px solid var(--border); }
+    .area { padding: 9px 0; background: none; border: 0; border-radius: 0; border-top: 1px solid var(--border); }
     .area:first-child { border-top: 0; padding-top: 0; }
     .linknote { margin-top: 4px; }
     .controls h2 { flex-basis: 100%; }
@@ -116,7 +117,7 @@
 
   <section class="card">
     <h3>Wifi mesh</h3>
-    <div class="units" id="mesh"><span class="muted">Reading the router and wifi points…</span></div>
+    <div class="units" id="mesh"><span class="muted">Reading…</span></div>
     <p class="muted" id="meshnote" style="margin:8px 0 0;font-size:12px" hidden></p>
   </section>
 
@@ -129,9 +130,6 @@
       <button data-sort="name">By name</button>
       <button data-sort="ip">By address</button>
     </div>
-    <p class="sub" style="margin:0 0 8px">Each device is checked once a minute with three quick pings. The bars show the last ten checks:
-      green answered every ping, amber missed some, red missed them all, grey means it's there but ignores pings (common for Windows laptops, consoles and TVs). Phones, tablets and gadgets nap to save battery,
-      so they're only flagged when they stop answering, not for being slow.</p>
     <div style="overflow-x:auto"><table id="devices"></table></div>
   </section>
 
@@ -151,18 +149,13 @@
     <section class="card">
       <h3>How Heimdall is connected</h3>
       <dl class="kv" id="link"></dl>
-      <p><button id="speedbtn">Run speed test</button> <span id="speed" class="sub"></span></p>
-      <p class="muted" style="margin:0;font-size:12px">The speed test downloads 25 MB, so it briefly uses your whole connection. It only runs when you press the button.</p>
+      <p style="margin:12px 0 0"><button id="speedbtn"title="Downloads 25 MB, so it briefly uses your whole connection">Run speed test</button> <span id="speed" class="sub"></span></p>
     </section>
     <section class="card">
       <h3>Comings &amp; goings</h3>
-      <div id="events" class="sub">Nothing yet. Devices joining or leaving will appear here.</div>
+      <div id="events" class="sub">Nothing yet.</div>
     </section>
   </div>
-  <section class="card" style="margin-top:12px">
-    <h3>What Heimdall can and can't see</h3>
-    <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses, because your router keeps that to itself. For per-device data use, check your router's own app.</p>
-  </section>
 </main>
 <script>
 const STATUS = { good: ["--good", "Good"], warning: ["--warning", "Fair"], serious: ["--serious", "Poor"], critical: ["--critical", "Bad"], off: ["--text-muted", "Offline"] };
@@ -189,7 +182,6 @@ const lossLevel = l => l == null ? "good" : l === 0 ? "good" : l < 2 ? "warning"
 
 // Internet targets come from the server's settings; the first one is "the internet" line.
 const inet = () => Object.keys(data.targets).filter(k => k !== "router");
-const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 // Chart lines: router, internet, then each wifi point. Colour follows the thing, not its position in a list.
 function lines() {
   return [{ key: "router", name: "Router", css: "--series-1" }, { key: inet()[0], name: "Internet", css: "--series-2" },
@@ -220,7 +212,7 @@ function render() {
   const link = data.link, onWifi = link?.type === "wifi";
   // Over wifi every reading includes Heimdall's own hop, so the bar for "fine" is higher.
   const rt = onWifi ? { good: 30, warn: 80, bad: 200 } : { good: 10, warn: 30, bad: 100 };
-  const r = stats("router", recent), [cf, gg = cf] = inet().map(k => stats(k, recent)), first = cap(inet()[0]), dns = stats("dns", now - 300);
+  const r = stats("router", recent), [cf, gg = cf] = inet().map(k => stats(k, recent)), dns = stats("dns", now - 300);
   const devs = (data.devices || []).map(deviceHealth);
   const ptStats = (data.points || []).map(ip => ({ ip, st: stats(`point:${ip}`, recent) }));
 
@@ -228,44 +220,43 @@ function render() {
   const meshBy = Object.fromEntries((data.mesh || []).map(u => [u.ip, u]));
   const rl = meshBy[data.targets.router]?.online === false ? "critical" : worse(level(r.p95, rt), lossLevel(r.loss));
   areas.push({ name: "Router", who: "The router is", l: rl, text:
-    meshBy[data.targets.router]?.online === false ? "The router says it has lost its internet connection. Check the cable to your modem."
-    : rl === "good" ? `Answering quickly, ${fmt(r.med)} ms typical.`
-    : r.loss >= 2 ? `Dropping ${fmt(r.loss)}% of replies. If this lasts, restart it.`
-    : level(r.med, rt) === "good" ? `Mostly quick (${fmt(r.med)} ms typical) but spiking up to ${fmt(r.max)} ms.${onWifi ? " Heimdall's own weak wifi can cause spikes like this." : ""}`
-    : `Slow to answer: ${fmt(r.med)} ms typical, spikes to ${fmt(r.max)} ms. A busy or overheated router does this.` });
+    meshBy[data.targets.router]?.online === false ? "Lost its internet connection. Check the modem cable."
+    : rl === "good" ? `${fmt(r.med)} ms, steady.`
+    : r.loss >= 2 ? `Dropping ${fmt(r.loss)}% of replies. Try a restart.`
+    : level(r.med, rt) === "good" ? `${fmt(r.med)} ms, spikes to ${fmt(r.max)} ms.${onWifi ? " Likely Heimdall's own wifi." : ""}`
+    : `Slow: ${fmt(r.med)} ms, spikes to ${fmt(r.max)} ms.` });
 
-  if (!ptStats.length) areas.push({ name: "Wifi points", who: "Wifi is", l: "good", text: data.last_scan ? "No separate wifi points found, so the router does all the wifi." : "Looking for wifi points…" });
+  if (!ptStats.length) areas.push({ name: "Wifi points", who: "Wifi is", l: "good", text: data.last_scan ? "None found; the router does all the wifi." : "Looking for wifi points…" });
   else {
     const judged = ptStats.map(p => ({ ...p, l: worse(level(p.st.p95, { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(p.st.loss)) }));
     const bad = judged.filter(p => p.l !== "good");
     const fresh = judged.filter(p => restarted(meshBy[p.ip]));
-    const restartNote = fresh.map(p => ` ${pointName(p.ip)} restarted ${Math.round(meshBy[p.ip].uptime / 60)} min ago.`).join("");
+    const restartNote = fresh.map(p => ` ${pointName(p.ip)} restarted ${dur(meshBy[p.ip].uptime)} ago.`).join("");
     areas.push({ name: `Wifi points (${judged.length})`, who: bad.length === 1 ? `${pointName(bad[0].ip)} is` : "The wifi points are", l: worse(...judged.map(p => p.l), fresh.length ? "warning" : "good"), text: (!bad.length
-      ? `${judged.length === 1 ? "It's" : `All ${judged.length} are`} answering well (${judged.map(p => fmt(p.st.med) + " ms").join(", ")}).`
-      : bad.every(p => p.st.loss < 2 && level(p.st.med, rt) === "good")
-        ? bad.map(p => `${pointName(p.ip)} is mostly quick (${fmt(p.st.med)} ms) but spiking up to ${fmt(p.st.max)} ms`).join("; ") + "."
-        : bad.map(p => `${pointName(p.ip)} is ${p.st.loss >= 2 ? `dropping ${fmt(p.st.loss)}% of replies` : `slow (${fmt(p.st.med)} ms typical)`}`).join("; ") +
-          ". It may be too far from the router or another point. Try moving it closer.") + restartNote });
+      ? `${judged.map(p => fmt(p.st.med)).join(" / ")} ms, steady.`
+      // say what's actually wrong with each one: usually fine but spiky is different from slow all the time
+      : bad.map(p => `${pointName(p.ip)} ${p.st.loss >= 2 ? `drops ${fmt(p.st.loss)}%` : level(p.st.med, rt) === "good" ? `spikes to ${fmt(p.st.max)} ms` : `is slow (${fmt(p.st.med)} ms)`}`).join("; ") +
+        (bad.every(p => p.st.loss < 2 && level(p.st.med, rt) === "good") ? "." : ". Try moving it closer.")) + restartNote });
   }
 
   const on = devs.filter(d => d.online), struggling = on.filter(d => RANK[d.l] <= 1);
   areas.push({ name: "Devices", who: struggling.length === 1 ? `${devName(struggling[0])} is` : "Some devices are", l: !data.last_scan ? "good" : struggling.length ? (struggling.length > 2 ? "serious" : "warning") : "good", text:
     !data.last_scan ? "First check running…"
     : struggling.length ? `${struggling.length} of ${on.length} struggling: ${struggling.slice(0, 4).map(d => `${devName(d)} (${d.why})`).join(", ")}${struggling.length > 4 ? "…" : ""}.`
-    : `All ${on.length} switched-on devices are answering normally.` });
+    : `All ${on.length} answering.` });
 
   const net = { good: 30, warn: 60, bad: 150 };
   const il = worse(level(Math.min(cf.p95 ?? 1e9, gg.p95 ?? 1e9) - (onWifi ? (r.med || 0) : 0), net), lossLevel(Math.min(cf.loss ?? 0, gg.loss ?? 0)));
   const iLoss = Math.min(cf.loss ?? 0, gg.loss ?? 0);
-  const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}% of replies`
-    : level(cf.med, net) === "good" ? `Mostly fast (${fmt(cf.med)} ms to ${first}) but with spikes up to ${fmt(cf.max)} ms`
-    : `Slow: ${fmt(cf.med)} ms to ${first}`;
+  const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}%`
+    : level(cf.med, net) === "good" ? `Spikes to ${fmt(cf.max)} ms`
+    : `Slow: ${fmt(cf.med)} ms`;
   const dl = dns.med != null && dns.med > 150 ? "warning" : "good";
   areas.push({ name: "Internet", who: "The internet is", l: worse(il, dl), text:
-    il !== "good" && rl === "good" ? `${iProblem}. Your home network is steady, so this is beyond your home, at your internet provider.`
-    : il !== "good" ? `${iProblem}. The router shows it too, so the trouble starts inside your home${onWifi ? ", possibly Heimdall's own wifi" : ""}.`
-    : dl !== "good" ? `Fast, but website lookups are slow (${fmt(dns.med)} ms), so pages are slow to start loading. Try switching your router to a public lookup service such as 1.1.1.1.`
-    : `Fast: ${fmt(cf.med)} ms to ${first}, website lookups ${fmt(dns.med)} ms.` });
+    il !== "good" && rl === "good" ? `${iProblem}. Your home is fine, so it's your provider.`
+    : il !== "good" ? `${iProblem}. The router too, so it's inside your home${onWifi ? " (maybe Heimdall's wifi)" : ""}.`
+    : dl !== "good" ? `Fast, but lookups are slow (${fmt(dns.med)} ms). Try 1.1.1.1 as your router's DNS.`
+    : `${fmt(cf.med)} ms, lookups ${fmt(dns.med)} ms.` });
 
   const overall = worse(...areas.map(a => a.l));
   const top = areas.filter(a => a.l === overall)[0];
@@ -279,8 +270,8 @@ function render() {
   if (onWifi) {
     const s = link.signal_dbm, word = s == null ? "unknown" : s > -60 ? "strong" : s > -70 ? "OK" : "weak";
     ln.hidden = false;
-    ln.textContent = `Heimdall is on ${word} wifi (${s ?? "?"} dBm), so its readings run ${word === "weak" ? "high and spiky" : "a little high"}. A cable to the router would sharpen them.`;
-  } else ln.hidden = !link ? (ln.textContent = "", true) : (ln.textContent = "Heimdall is plugged in by cable, so these readings show your network, not Heimdall's own wifi.", false);
+    ln.textContent = `Heimdall is on ${word} wifi (${s ?? "?"} dBm), so readings run ${word === "weak" ? "high" : "a little high"}. A cable would sharpen them.`;
+  } else ln.hidden = true;
 
   renderMesh(meshBy, rt);
   renderDevices(devs);
@@ -309,19 +300,19 @@ function renderMesh(meshBy, rt) {
     const u = meshBy[ip], isRouter = ip === data.targets.router, key = isRouter ? "router" : `point:${ip}`;
     const st = stats(key, Date.now() / 1000 - 300);
     const l = worse(level(st.p95, isRouter ? rt : { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(st.loss));
-    const lines = [`${fmt(st.med)} ms typical, ${fmt(st.loss)}% lost (last 5 min)`];
+    const lines = [`${fmt(st.med)} ms · ${fmt(st.loss)}% lost`];
     if (u) {
-      lines.push(isRouter ? "Main router" : u.wired ? "Joined to the mesh by cable" : "Joined to the mesh over wifi");
+      lines.push(isRouter ? "Main router" : u.wired ? "Wired" : "Wireless");
       if (u.uptime != null) lines.push(restarted(u) ? `<b>Restarted ${dur(u.uptime)} ago</b>` : `Up ${dur(u.uptime)}`);
-      if (u.update) lines.push("Installing a software update");
-      if (isRouter && u.online === false) lines.push("<b>Says it's offline from the internet</b>");
-    } else lines.push("No status page, so pings only");
+      if (u.update) lines.push("Updating");
+      if (isRouter && u.online === false) lines.push("<b>Offline from the internet</b>");
+    } else lines.push("Pings only");
     return `<div class="unit"><div class="top"><span>${isRouter ? "Router" : pointName(ip)}</span>${badge(l)}</div>${lines.map(x => `<div>${x}</div>`).join("")}</div>`;
   }).join("");
   const root = meshBy[data.targets.router];
   const note = $("meshnote");
   note.hidden = !root?.upstream;
-  if (root?.upstream) note.textContent = `Your router reaches the internet through another router at ${root.upstream} (probably your internet provider's modem). Two routers in a row is usually fine, but it can upset some games and video calls.`;
+  if (root?.upstream) note.textContent = `Behind another router at ${root.upstream} (likely your modem). Usually fine; can upset some games and calls.`;
 }
 
 let devSort = "health";
@@ -356,7 +347,7 @@ function renderDevices(devs) {
       <td>${d.online ? badge(d.l) + (d.why ? ` <span class="muted">${d.why}</span>` : "") : `<span class="muted">left ${ago(d.last)}</span>`}</td></tr>`;
   const groups = GROUPS.map(([name, kinds]) => ({ name, devs: devs.filter(d => kinds.includes(d.kind)) }))
     .concat([{ name: "Other", devs: devs.filter(d => !GROUPS.some(([, k]) => k.includes(d.kind))) }]).filter(g => g.devs.length);
-  $("devices").innerHTML = `<thead><tr><th>Device</th><th>Address</th><th>Typical</th><th>Worst</th><th>Last checks</th><th>Health</th></tr></thead>` +
+  $("devices").innerHTML = `<thead><tr><th>Device</th><th>Address</th><th>Typical</th><th>Worst</th><th title="One bar per check (3 pings, once a minute). Green: all answered. Amber: some missed. Red: none. Grey: there, but ignores pings. Phones and gadgets nap, so they're only flagged when they stop answering.">Last checks ⓘ</th><th>Health</th></tr></thead>` +
     groups.map(g => {
       const on = g.devs.filter(d => d.online).length, bad = g.devs.filter(d => d.online && RANK[d.l] <= 1);
       const open = g.name in openGroups ? openGroups[g.name] : g.name === "Network" || bad.length > 0;
@@ -416,7 +407,7 @@ function drawChart(since, now) {
   svg.innerHTML = g;
   geom = { since, now, m, W, pts, ls };
   $("legend").innerHTML = ls.map(s => `<span style="--c:var(${s.css})">${s.name}</span>`).join("") +
-    `<span style="--c:var(--critical)">Lost reply (red tick)</span>`;
+    `<span style="--c:var(--critical)">Lost reply</span>`;
 }
 
 const chartwrap = document.querySelector(".chartwrap");

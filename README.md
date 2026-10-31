@@ -3,6 +3,8 @@
 **Is it the wifi, the router, or the internet?** Heimdall is a small, always-on
 dashboard for your home network that answers that in plain English.
 
+![Heimdall dashboard: a verdict for the router, wifi points, devices and internet, above a card for each wifi point](docs/screenshot.png)
+
 Run it on any Linux machine at home, open `http://heimdall.local:8765` from your
 phone, and you get:
 
