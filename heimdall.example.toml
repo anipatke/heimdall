@@ -22,6 +22,16 @@
 # cloudflare = "1.1.1.1"
 # google = "8.8.8.8"
 
+# Alerts: Heimdall messages you when the internet goes down, a wifi point stops answering or restarts,
+# or a new device joins. Test with: python3 server.py --test-alert
+# [alerts]
+# WhatsApp or Signal via CallMeBot (free for personal use; see the README for getting your key):
+# url = "https://api.callmebot.com/whatsapp.php?phone=+61400000000&apikey=123456&text={text}"
+# url = "https://signal.callmebot.com/signal/send.php?phone=+61400000000&apikey=123456&text={text}"
+# Or ntfy (free phone app): pick a hard-to-guess topic and subscribe to it in the app
+# url = "https://ntfy.sh/heimdall-pick-something-unguessable"
+# offline_after = 120             # seconds a wifi point can be silent before you're told
+
 # Your own names for devices and wifi points, by address. Shown everywhere instead of ".138" or a network name.
 # [names]
 # "192.168.1.138" = "Master bedroom"
