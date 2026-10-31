@@ -10,9 +10,20 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
-from urllib.request import urlopen, Request
+from urllib.request import urlopen, Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+C_LOCALE = {**os.environ, "LC_ALL": "C"}  # ping and ip output is parsed, so keep it in English whatever the system language
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *a):
+        return None
+
+
+# For reading status pages of devices at home: no proxy, and no following a device's redirect somewhere else.
+LOCAL = build_opener(ProxyHandler({}), _NoRedirect)
+OUT = build_opener(_NoRedirect)  # alerts: a redirect could point back into this machine, past the checks below
 
 
 CONFIG = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
@@ -27,7 +38,7 @@ EDITABLE = {
     ("checks", "device_every"): (60, 15, 3600),
     ("checks", "pings_per_check"): (3, 1, 10),
     ("checks", "sweep_every"): (600, 60, 86400),
-    ("checks", "speedtest_mb"): (25, 1, 1000),
+    ("checks", "speedtest_mb"): (25, 1, 200),
     ("thresholds", "router"): ([10, 30, 100], 0, 60000),
     ("thresholds", "router_wifi"): ([30, 80, 200], 0, 60000),  # Heimdall on wifi: every reading includes its own hop
     ("thresholds", "wifi_point_extra"): ([20, 40, 100], 0, 60000),  # added to the router's limits
@@ -38,7 +49,7 @@ EDITABLE = {
     ("thresholds", "device_missed"): ([10, 34], 1, 100),  # % missed: "missing replies", "not answering"
     ("alerts", "internet_after"): (60, 10, 86400),
     ("alerts", "offline_after"): (120, 10, 86400),
-    ("logs", "max_mb"): (100, 1, 100000),
+    ("logs", "max_mb"): (100, 1, 2000),
 }
 ALL_ALERTS = ["internet", "wifi_points", "restarts", "new_devices"]
 
@@ -52,7 +63,7 @@ def load_config():
         cfg = {}
     flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {})}
     for key in ("port", "host", "router", "mdns_name", "mdns_ip"):
-        if os.environ.get(key.upper()):
+        if os.environ.get(key.upper()) or (key == "mdns_name" and "MDNS_NAME" in os.environ):  # MDNS_NAME="" turns it off
             flat[key] = os.environ[key.upper()]
     return flat, cfg.get("kinds", []), cfg.get("names", {}), cfg
 
@@ -64,7 +75,7 @@ def conf(section, key):
 
 def default_route():
     """(router address, network interface) from this machine's default route."""
-    out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
+    out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True, env=C_LOCALE).stdout
     m = re.search(r"via (\S+) dev (\S+)", out)
     if not m:
         raise SystemExit("Couldn't find your router: this machine has no default route. Set router in heimdall.toml.")
@@ -94,12 +105,12 @@ _s.close()
 MDNS_IP = CFG.get("mdns_ip", MY_IP)
 # The home network, from the address and prefix on the router-facing interface. Sweeps stay within
 # 1024 addresses: a bigger network gets the /22 around this machine.
-_m = re.search(rf"inet ({re.escape(MY_IP)}/\d+)", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout)
+_m = re.search(rf"inet ({re.escape(MY_IP)}/\d+)", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, env=C_LOCALE).stdout)
 NET = ipaddress.ip_interface(CFG.get("network") or (_m.group(1) if _m else f"{MY_IP}/24")).network
 if NET.num_addresses > 1024:
     NET = ipaddress.ip_interface(f"{MY_IP}/22").network
 # every address this machine answers to (it may have a second one just for heimdall.local)
-MY_IPS = set(re.findall(r"inet (\S+)/", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout)) | {MY_IP}
+MY_IPS = set(re.findall(r"inet (\S+)/", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, env=C_LOCALE).stdout)) | {MY_IP}
 # (pattern in the device's network name, friendly type) - first match wins; heimdall.toml's [[kinds]] go first
 KINDS = [(k["match"], k["kind"]) for k in EXTRA_KINDS] + [(r"nest-wifi-point|google-wifi", "Wifi point"), (r"google-home|nest-(mini|audio|hub)", "Smart speaker"),
          (r"sonos", "Sonos speaker"), (r"^esp_|tasmota|shelly", "Smart-home gadget"),
@@ -170,15 +181,31 @@ def record(kind, value):
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
 
 
+def alert_url_problem(url):
+    """Why an alert address can't be used, or None. Alerts go to services out there or elsewhere at home,
+    never back into this machine, so the settings page can't be used to poke at what runs here."""
+    m = re.fullmatch(r"(https?)://([^/:?#\s]+|\[[0-9a-fA-F:]+\])(:\d+)?([/?#]\S*)?", url) if len(url) <= 500 else None
+    if not m:
+        return "The alert address should be a web address starting with http:// or https://"
+    try:
+        addrs = {ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(m.group(2).strip("[]"), None)}
+    except (OSError, ValueError):
+        return "Couldn't find that alert address"
+    if any(a.is_loopback or a.is_link_local or a.is_unspecified or a.is_multicast or str(a) in MY_IPS for a in addrs):
+        return "Alerts can't be sent to this machine itself"
+
+
 def send_alert(text, url=None):
     """Send one alert to [alerts] url. With {text} in the url it's a GET with the message filled in (WhatsApp or
     Signal via CallMeBot); otherwise the message is POSTed as the body (ntfy and most webhooks). Returns an error or None."""
     text = f"Heimdall: {text}"
     url = url or ALERTS["url"]
+    if problem := alert_url_problem(url):
+        return problem
     try:
         req = url.replace("{text}", quote(text, safe="")) if "{text}" in url else Request(url, data=text.encode())
-        with urlopen(req, timeout=20) as r:
-            r.read()
+        with OUT.open(req, timeout=20) as r:
+            r.read(65536)
     except Exception as e:
         return f"Couldn't send alert: {e}"
 
@@ -186,7 +213,10 @@ def send_alert(text, url=None):
 def alert(text):
     print(f"Alert: {text}", flush=True)
     if ALERTS.get("url"):
-        threading.Thread(target=lambda: (err := send_alert(text)) and print(err, flush=True), daemon=True).start()
+        def send():
+            if err := send_alert(text):
+                print(err, flush=True)
+        threading.Thread(target=send, daemon=True).start()
 
 
 def point_label(ip):
@@ -205,7 +235,7 @@ def alert_loop():
         if "internet" in ALERT_ON:
             checks["The internet"] = (min(quiet(k) for k in TARGETS if k != "router"), int(conf("alerts", "internet_after")))
         if "wifi_points" in ALERT_ON:
-            checks |= {point_label(ip): (quiet(f"point:{ip}"), after) for ip in list(points)}
+            checks |= {point_label(ip): (quiet(f"point:{ip}"), after) for ip in point_list()}
         # if even the router is silent, it's Heimdall's own connection that's down, so don't blame anything else
         heimdall_ok = quiet("router") < 30
         for what, (silent, limit) in checks.items():
@@ -233,7 +263,7 @@ def pinger(name, host):
     seq_re = re.compile(r"icmp_seq=(\d+).*time=([\d.]+)")
     miss_re = re.compile(r"no answer yet for icmp_seq=(\d+)")
     while True:
-        p = subprocess.Popen(["ping", "-n", "-O", "-i", str(PING_EVERY), "-W", "2", host],
+        p = subprocess.Popen(["ping", "-n", "-O", "-i", str(PING_EVERY), "-W", "2", host], env=C_LOCALE,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         late = {}  # seq -> when ping said "no answer yet"; a slow reply can still turn up
         try:
@@ -277,7 +307,7 @@ def dns_loop():
 
 def read_link():
     """How Heimdall itself is connected: cable or wifi, and how good that wifi is."""
-    route = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True).stdout
+    route = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True, env=C_LOCALE).stdout
     m = re.search(r"\bdev (\S+)", route)
     if not m:
         return None
@@ -288,7 +318,7 @@ def read_link():
         except (OSError, ValueError):
             speed = None
         return {"type": "cable", "dev": dev, "speed_mbps": speed if speed and speed > 0 else None}
-    out = subprocess.run(["iw", "dev", dev, "link"], capture_output=True, text=True, timeout=10).stdout
+    out = subprocess.run(["iw", "dev", dev, "link"], capture_output=True, text=True, env=C_LOCALE, timeout=10).stdout
     get = lambda pat: (m := re.search(pat, out)) and m.group(1)
     freq = get(r"freq: ([\d.]+)")
     return {"type": "wifi", "dev": dev, "ssid": get(r"SSID: (.+)"), "bssid": get(r"Connected to ([0-9a-f:]{17})"),
@@ -312,7 +342,7 @@ def link_loop():
 def probe(ip, count, arp=True):
     """Ping a device; returns (avg_ms, max_ms, lost) or None if it didn't answer at all."""
     out = subprocess.run(["ping", "-n", "-q", "-c", str(count), "-i", "1", "-W", "1", ip],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, env=C_LOCALE).stdout
     got = re.search(r"(\d+) received", out)
     m = re.search(r"= [\d.]+/([\d.]+)/([\d.]+)", out)
     if m and got:
@@ -325,7 +355,7 @@ def answers_arp(ip, wait=7):
     The ping we just sent makes the kernel ask; watch for the answer for a few seconds."""
     start = time.time()
     while time.time() - start < wait:
-        st = subprocess.run(["ip", "neigh", "show", ip], capture_output=True, text=True).stdout.split()
+        st = subprocess.run(["ip", "neigh", "show", ip], capture_output=True, text=True, env=C_LOCALE).stdout.split()
         if "REACHABLE" in st:
             return True
         if not st or "FAILED" in st:
@@ -351,7 +381,7 @@ def kind_of(ip, name, vendor=None):
 def neighbours(confirmed=False):
     """Addresses this machine has recently talked to, with their hardware addresses - free to read.
     confirmed=True keeps only ones that just answered the network's "who has this address?" call."""
-    out = subprocess.run(["ip", "neigh"], capture_output=True, text=True).stdout
+    out = subprocess.run(["ip", "neigh"], capture_output=True, text=True, env=C_LOCALE).stdout
     return {ip: mac for ip, mac, st in re.findall(r"^(\S+) .*lladdr (\S+).* (\S+)\s*$", out, re.M)
             if ipaddress.ip_address(ip) in NET and ip not in MY_IPS and (not confirmed or st == "REACHABLE")}
 
@@ -451,10 +481,31 @@ def mdns_loop(name, ip):
         time.sleep(30)
 
 
+points_lock = threading.Lock()
+
+
 def add_point(ip):
-    if ip not in points:
+    with points_lock:
+        if ip in points:
+            return
         points.add(ip)
-        forever(pinger, f"point:{ip}", ip)
+    forever(pinger, f"point:{ip}", ip)
+
+
+def point_list():
+    with points_lock:
+        return sorted(points)
+
+
+def status_page(ip, timeout):
+    """A Google/Nest unit's own status page, as a dict, or None. Read at most 64 KB, since any device at home
+    could answer on that address, and something that never stops sending mustn't use up all our memory."""
+    try:
+        with LOCAL.open(f"http://{ip}/api/v1/status", timeout=timeout) as r:
+            st = json.loads(r.read(65536))
+    except Exception:
+        return None
+    return st if isinstance(st, dict) else None
 
 
 def mdns_name(ip):
@@ -470,23 +521,21 @@ def mdns_name(ip):
 
 def identify(ip):
     """For each new device: is it a Google/Nest mesh unit (they often have no name), and does it announce a name?"""
-    try:
-        with urlopen(f"http://{ip}/api/v1/status", timeout=3) as r:
-            role = json.load(r).get("system", {}).get("groupRole")
-    except Exception:
-        role = None
+    sysinfo = (status_page(ip, 3) or {}).get("system")
+    role = sysinfo.get("groupRole") if isinstance(sysinfo, dict) else None
     d = devices[ip]
-    if role:
+    if isinstance(role, str) and role:
         with lock:
             d["kind"], d["identified"] = "Wifi point", True
         add_point(ip)
         return
-    if d["name"]:
-        d["identified"] = True
-    elif name := mdns_name(ip):
-        d["identified"] = True
-        name = re.sub(r"^Android_\w+$", "Android device", name)
-        with lock:
+    name = None if d["name"] else mdns_name(ip)
+    with lock:
+        if d["name"]:
+            d["identified"] = True
+        elif name:
+            d["identified"] = True
+            name = re.sub(r"^Android_\w+$", "Android device", name)
             d["name"] = name
             if d["kind"] == "Unknown":
                 d["kind"] = "Phone" if name == "Android device" else kind_of(ip, name, d.get("vendor"))
@@ -495,14 +544,14 @@ def identify(ip):
 def mesh_loop():
     """Once a minute, read the status page the Nest/Google router and each wifi point serve on the home network."""
     while True:
-        for ip in [ROUTER, *sorted(points)]:
-            try:
-                with urlopen(f"http://{ip}/api/v1/status", timeout=5) as r:
-                    st = json.load(r)
-            except Exception:
+        for ip in [ROUTER, *point_list()]:
+            st = status_page(ip, 5)
+            if not st:
                 continue  # not a Google/Nest unit, or busy; the pings still say if it's alive
-            sysinfo, sw, wan = st.get("system", {}), st.get("software", {}), st.get("wan", {})
+            # anything that isn't the shape we expect is treated as missing, so one odd unit can't stop the rest
+            sysinfo, sw, wan = (st.get(k) if isinstance(st.get(k), dict) else {} for k in ("system", "software", "wan"))
             now, up = time.time(), sysinfo.get("uptime")
+            up = up if type(up) in (int, float) else None
             old = mesh.get(ip)
             with lock:
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
@@ -523,7 +572,9 @@ def speed_test():
     try:
         t0 = time.perf_counter()
         with urlopen(f"https://speed.cloudflare.com/__down?bytes={int(SPEEDTEST_MB * 1e6)}", timeout=30 + SPEEDTEST_MB) as r:
-            n = len(r.read())
+            n = 0
+            while chunk := r.read(1 << 16):  # count it, don't keep it
+                n += len(chunk)
         state["speed"] = {"mbps": round(n * 8 / (time.perf_counter() - t0) / 1e6, 1), "at": time.time()}
         record("download_mbps", state["speed"]["mbps"])
     except Exception as e:
@@ -534,9 +585,20 @@ def speed_test():
 
 def toml_text(cfg):
     """heimdall.toml from a dict. Enough TOML for Heimdall's own settings: tables of numbers, strings and lists."""
-    val = lambda v: ("true" if v else "false") if isinstance(v, bool) else json.dumps(v) if isinstance(v, (str, int, float)) \
-        else "[" + ", ".join(map(val, v)) + "]"
-    key = lambda k: k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+    def text(t):  # a TOML string: JSON's escapes, but real characters for emoji (TOML has no \ud83d-style pairs)
+        return json.dumps(t, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+    def val(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, str):
+            return text(v)
+        if isinstance(v, (int, float)):
+            return json.dumps(v)
+        return "[" + ", ".join(map(val, v)) + "]"
+
+    def key(k):
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else text(k)
     out = ["# Heimdall settings, saved from the settings page. Editing by hand is fine too; see heimdall.example.toml."]
     for section, table in cfg.items():
         for t in (table if isinstance(table, list) else [table]):  # [[kinds]] is a list of tables
@@ -552,6 +614,8 @@ def save_settings(new):
     """Check what the settings page sent and merge it into heimdall.toml. Returns a problem to show, or None.
     Settings left at their default are taken out of the file, so it only holds what you changed."""
     cfg = load_config()[3]  # fresh from disk, so hand edits since startup aren't lost
+    if not all(isinstance(new.get(s, {}), dict) for s in ("checks", "thresholds", "alerts", "logs", "names")):
+        return "That didn't look like settings."
     for (section, k), (default, lo, hi) in EDITABLE.items():
         if k not in new.get(section, {}):
             continue
@@ -569,12 +633,14 @@ def save_settings(new):
     alerts = new.get("alerts", {})
     if "url" in alerts:
         u = str(alerts["url"]).strip()
-        if u and not re.fullmatch(r"https?://\S{3,500}", u):
-            return "The alert address should start with http:// or https://"
+        if u and (problem := alert_url_problem(u)):
+            return problem
         cfg.setdefault("alerts", {})["url"] = u
         if not u:
             cfg["alerts"].pop("url")
     if "on" in alerts:
+        if not isinstance(alerts["on"], list):
+            return "That didn't look like settings."
         on = [a for a in ALL_ALERTS if a in alerts["on"]]
         cfg.setdefault("alerts", {})["on"] = on
         if on == ALL_ALERTS:
@@ -584,17 +650,21 @@ def save_settings(new):
             ipaddress.IPv4Address(ip)
         except ValueError:
             return f"{ip} isn't an address"
-        name = str(name).strip()[:40]
+        name = "".join(c for c in str(name) if c.isprintable()).strip()[:40]  # no control characters
         cfg.setdefault("names", {})[ip] = name
         if not name:
             cfg["names"].pop(ip)
     cfg = {s: t for s, t in cfg.items() if t}  # drop tables that ended up empty
     text = toml_text(cfg)
-    if tomllib.loads(text) != cfg:  # never write a file that wouldn't read back the same
+    try:
+        same = tomllib.loads(text) == cfg
+    except tomllib.TOMLDecodeError:
+        same = False
+    if not same:  # never write a file that wouldn't read back the same
         return "Couldn't write these settings safely, so nothing was changed."
     if os.path.exists(CONFIG):
         shutil.copyfile(CONFIG, CONFIG + ".bak")
-    with open(CONFIG + ".tmp", "w") as f:
+    with open(CONFIG + ".tmp", "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(CONFIG + ".tmp", CONFIG)
 
@@ -605,29 +675,54 @@ def restart():
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
+def allowed_hosts():
+    """Names and addresses the dashboard may be opened by. Anything else is refused, which stops a website from
+    pointing its own name at this machine (DNS rebinding) to read or change Heimdall through your browser."""
+    me = socket.gethostname().lower()
+    extra = CFG.get("allowed_hosts", [])  # e.g. a name your router or a VPN gives this machine
+    return {h.lower() for h in [MDNS_NAME or "", MDNS_IP, *MY_IPS, HOST, "localhost", "127.0.0.1", "::1",
+                                me, f"{me}.local", f"{me}.lan", f"{me}.home", *extra] if h}
+
+
 class Handler(BaseHTTPRequestHandler):
+    timeout = 10  # a client that stops talking mid-request doesn't hold a thread forever
+
     def log_message(self, *a):
         pass
 
-    def send(self, body, ctype):
-        self.send_response(200)
+    def send(self, body, ctype, code=200):
+        self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")  # no other page may frame this one and trick clicks on Save
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
+    def host_ok(self):
+        host = (self.headers.get("Host") or "").lower()
+        host = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
+        if host in HOSTS:
+            return True
+        self.send(f"Open Heimdall at http://{MDNS_NAME or MY_IP}:{PORT}/ (this address isn't one it answers to; "
+                  "add it to allowed_hosts in heimdall.toml if it should be)".encode(), "text/plain; charset=utf-8", 421)
+        return False
+
     def do_GET(self):
+        if not self.host_ok():
+            return
         url = urlparse(self.path)
         if url.path == "/data":
             # The page asks only for what's new since its last update, so an open tab stays cheap.
             q = parse_qs(url.query)
             since, seen_scan = float(q.get("since", ["0"])[0]), float(q.get("scan", ["0"])[0])
             with lock:
-                fresh = {k: [[round(t, 2), v] for t, v in q if t > since] for k, q in series.items()}
+                fresh = {k: [[round(t, 2), v] for t, v in dq if t > since] for k, dq in series.items()}
                 # the device list only changes once a minute, so skip it if the page already has this one
                 devs = None if seen_scan == state["last_scan"] else [{**d, "rtt": d["rtt"][-10:]} for d in devices.values()]
                 evs = events[-30:]
-            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "thresholds": THRESHOLDS, "pings_per_check": PINGS_PER_CHECK, "points": sorted(points), "mesh": list(mesh.values()),
+            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "thresholds": THRESHOLDS, "pings_per_check": PINGS_PER_CHECK, "points": point_list(), "mesh": list(mesh.values()),
                                   "devices": devs, "events": evs, "host": socket.gethostname(), **state},
                                  separators=(",", ":")).encode(), "application/json")
         elif url.path == "/settings":
@@ -635,37 +730,51 @@ class Handler(BaseHTTPRequestHandler):
                 "values": {s: {k: conf(s, k) for s2, k in EDITABLE if s2 == s} for s, _ in EDITABLE},
                 "defaults": {s: {k: d for (s2, k), (d, _, _) in EDITABLE.items() if s2 == s} for s, _ in EDITABLE},
                 "limits": {f"{s}.{k}": [lo, hi] for (s, k), (_, lo, hi) in EDITABLE.items()},
-                "alerts": {"url": ALERTS.get("url", ""), "on": sorted(ALERT_ON)}, "all_alerts": ALL_ALERTS,
-                "names": NAMES, "router": ROUTER, "points": sorted(points)}).encode(), "application/json")
-        elif url.path == "/speedtest":
-            if not state["speed_running"]:
-                threading.Thread(target=speed_test, daemon=True).start()
-            self.send(b"{}", "application/json")
+                # where alerts go, but not the whole address: for ntfy that's the secret, for CallMeBot the key
+                "alerts": {"saved": re.sub(r"^(https?://[^/?#]+).*", r"\1/…", ALERTS.get("url", "")), "on": sorted(ALERT_ON)},
+                "all_alerts": ALL_ALERTS, "names": NAMES, "router": ROUTER, "points": point_list()}).encode(), "application/json")
         else:
             with open(os.path.join(HERE, "index.html"), "rb") as f:
                 self.send(f.read(), "text/html; charset=utf-8")
 
     def do_POST(self):
         # Changes need this header, which other websites can't add to a request sent through your browser.
-        if self.headers.get("X-Heimdall") != "1":
-            self.send_response(403)
-            self.end_headers()
+        if not self.host_ok():
             return
+        if self.headers.get("X-Heimdall") != "1":
+            return self.send(b'{"error": "Not allowed"}', "application/json", 403)
         try:
-            body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 100_000)) or "{}")
+            size = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            size = -1
+        if not 0 <= size <= 100_000:
+            return self.send(b'{"error": "Too big"}', "application/json", 413)
+        try:
+            body = json.loads(self.rfile.read(size) or "{}")
         except ValueError:
             body = None
-        if not isinstance(body, dict):
-            err = "That didn't look like settings."
-        elif self.path == "/settings":
-            err = save_settings(body)
-            if not err:
-                threading.Timer(1, restart).start()  # after this reply has gone out
-        elif self.path == "/test-alert":
-            u = str(body.get("url") or ALERTS.get("url") or "")
-            err = send_alert("test alert from the settings page.", u) if re.fullmatch(r"https?://\S{3,500}", u) else "Add an alert address first."
-        else:
-            err = "Unknown request"
+        try:
+            if not isinstance(body, dict):
+                err = "That didn't look like settings."
+            elif self.path == "/settings":
+                err = save_settings(body)
+                if not err:
+                    threading.Timer(1, restart).start()  # after this reply has gone out
+            elif self.path == "/test-alert":
+                u = str(body.get("url") or ALERTS.get("url") or "")
+                err = (alert_url_problem(u) if u else "Add an alert address first.") or send_alert("test alert from the settings page.", u)
+                if err and not err.startswith(("The alert", "Alerts can't", "Couldn't find", "Add an")):
+                    print(err, flush=True)  # the details stay in Heimdall's log, not in the reply
+                    err = "Couldn't send it. Check the address; Heimdall's log has the details."
+            elif self.path == "/speedtest":
+                if not state["speed_running"]:
+                    threading.Thread(target=speed_test, daemon=True).start()
+                err = None
+            else:
+                err = "Unknown request"
+        except Exception as e:  # a bad request mustn't take the page down with it
+            print(f"Request to {self.path} failed: {e!r}", flush=True)
+            err = "Something went wrong; Heimdall's log has the details."
         self.send(json.dumps({"error": err}).encode(), "application/json")
 
 
@@ -699,4 +808,5 @@ if __name__ == "__main__":
         forever(mdns_loop, MDNS_NAME, MDNS_IP)
     where = f"http://{MDNS_NAME}" + ("" if PORT == 80 else f":{PORT}") if MDNS_NAME else f"http://{MY_IP}:{PORT}"
     print(f"Heimdall: {where}  (router {ROUTER}, network {NET}, log {LOG})")
+    HOSTS = allowed_hosts()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

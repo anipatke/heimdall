@@ -201,7 +201,8 @@ const level = (v, t) => v == null ? "critical" : v < t.good ? "good" : v < t.war
 const worse = (...ls) => ls.reduce((a, b) => RANK[b] < RANK[a] ? b : a, "good");
 const badge = l => `<span class="status"><i style="background:var(${STATUS[l][0]})"></i>${STATUS[l][1]}</span>`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const pointName = ip => data?.names?.[ip] || `Wifi point .${ip.split(".").pop()}`;
+// Both return HTML: names come from settings and from devices themselves, so they're escaped here, once.
+const pointName = ip => esc(data?.names?.[ip] || `Wifi point .${ip.split(".").pop()}`);
 const devName = d => d.name ? esc(d.name) : `<span class="muted">${d.ip}</span>`;
 
 function stats(kind, since) {
@@ -296,7 +297,7 @@ function render() {
 
   const overall = worse(...areas.map(a => a.l));
   const top = areas.filter(a => a.l === overall)[0];
-  $("headline").textContent = r.n < 20 ? "Gathering a minute of readings…"
+  $("headline").innerHTML = r.n < 20 ? "Gathering a minute of readings…"
     : overall === "good" ? "All clear across your network."
     : overall === "warning" ? `Mostly fine. ${top.who} a little shaky.`
     : `${top.who} struggling.`;
@@ -469,7 +470,7 @@ document.querySelectorAll("[data-range]").forEach(b => b.onclick = () => {
   document.querySelectorAll("[data-range]").forEach(o => o.setAttribute("aria-pressed", o === b));
   render();
 });
-$("speedbtn").onclick = () => fetch("/speedtest").then(poll);
+$("speedbtn").onclick = () => post("/speedtest", {}).then(poll);
 
 // Settings: [section, key, label, unit, help, labels for each box when there's more than one]
 const LEVELS = ["Good under", "Fair under", "Poor under"];
@@ -513,8 +514,9 @@ function renderSettings(st) {
   const units = [st.router, ...st.points];
   $("settingsBody").innerHTML = SETTINGS.map(([title, fields]) => `<h3>${title}</h3>` + (title === "Alerts" ? `
       <div class="field" style="grid-template-columns:1fr"><span>Send alerts to <span class="muted">(ntfy topic address, or any web address; {text} is filled in with the message)</span></span>
-        <div class="inputs"><input type="url" id="alertUrl" value="${esc(st.alerts.url)}" placeholder="https://ntfy.sh/your-topic">
-        <button type="button" id="testAlert">Send test</button></div></div>
+        <div class="inputs"><input type="url" id="alertUrl" value="" placeholder="${st.alerts.saved ? `${esc(st.alerts.saved)} (saved; type a new address to replace it)` : "https://ntfy.sh/your-topic"}">
+        <button type="button" id="testAlert">Send test</button></div>
+        ${st.alerts.saved ? `<label class="help" style="margin:0"><input type="checkbox" id="alertForget"> Forget the saved address and stop sending alerts</label>` : ""}</div>
       <div class="checks-on">${st.all_alerts.map(a => `<label><input type="checkbox" data-alert="${a}" ${st.alerts.on.includes(a) ? "checked" : ""}> ${ALERT_NAMES[a]}</label>`).join("")}</div>` : "")
     + fields.map(field).join("")).join("") + `<h3>Names</h3>` + units.map(ip => `<div class="field"><span>${ip === st.router ? "Router" : "Wifi point"} <span class="muted">${ip}</span></span>
       <div class="inputs"><input type="text" maxlength="40" data-name="${ip}" value="${esc(st.names[ip] || "")}" placeholder="${ip === st.router ? "Router" : `Wifi point .${ip.split(".").pop()}`}"></div></div>`).join("");
@@ -540,7 +542,10 @@ $("settingsCancel").onclick = () => $("settings").close();
 $("settingsForm").onsubmit = async e => {
   e.preventDefault();
   if (!saved) return;
-  const out = { alerts: { url: $("alertUrl").value.trim(), on: [...document.querySelectorAll("[data-alert]:checked")].map(c => c.dataset.alert) }, names: {} };
+  const out = { alerts: { on: [...document.querySelectorAll("[data-alert]:checked")].map(c => c.dataset.alert) }, names: {} };
+  // The saved address never comes back to the page (it's the secret part), so only send one that was typed or cleared.
+  const typed = $("alertUrl").value.trim();
+  if (typed) out.alerts.url = typed; else if ($("alertForget")?.checked) out.alerts.url = "";
   for (const inp of document.querySelectorAll("#settingsBody input[type=number]")) {
     const { sec, key } = inp.dataset, i = +inp.dataset.i, d = saved.defaults[sec][key];
     const v = inp.value === "" ? (i < 0 ? d : d[i]) : +inp.value;
