@@ -94,6 +94,7 @@ could lock you out of the page:
 | `host` | all addresses | Listen on one address only |
 | `mdns_name` | `heimdall.local` | Name other devices find it by; `""` turns it off |
 | `mdns_ip` | this machine | Address that name points at |
+| `allowed_hosts` | its own names | Extra names it may be opened by (see Privacy) |
 | `router` | detected | Your router's address |
 | `network` | detected | Address range to look for devices in (up to 1024 addresses) |
 | `ping_every` | 1 | Seconds between pings to the router, internet and wifi points |
@@ -178,8 +179,15 @@ alerts, only the alert messages leave your network. Each log is
 capped at 100 MB (`[logs] max_mb`). When it fills up it's renamed to `.old`, replacing the
 previous one, so the logs never take more than about 400 MB.
 
-The dashboard has no login. Anyone on your home network can open it and see
-your device names. Don't expose it to the internet.
+The dashboard has no login. Anyone on your home network can open it, see your
+device names and change settings, though not the saved alert address, which is
+never shown. Don't expose it to the internet.
+
+Heimdall only answers when it's opened by its own name or address
+(`heimdall.local`, this machine's name and addresses, `localhost`). That stops
+a website from pointing a name of its own at your network to reach it through
+your browser. If you open it some other way, for example a name your router or
+VPN gives this machine, add that name to `allowed_hosts`.
 
 ## Limits
 
@@ -217,8 +225,9 @@ Common things to change when forking:
   network names and makers to types
 - **Other mesh systems**: `mesh_loop` reads each Google / Nest unit's local
   `/api/v1/status` page. Another router's status page could be read there in the same way
-- **What counts as slow**: the `{ good, warn, bad }` thresholds (in milliseconds)
-  in `render()` in `index.html`
+- **What counts as slow**: `EDITABLE` in `server.py` holds every setting's default
+  and allowed range. The page reads the thresholds from the server, so the
+  dashboard and alerts always agree
 
 ## License
 

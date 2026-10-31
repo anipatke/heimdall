@@ -8,6 +8,7 @@
 # host = "0.0.0.0"                # listen on one address only, e.g. "192.168.1.10"
 # mdns_name = "heimdall.local"    # the name other devices use to find the dashboard; "" turns it off
 # mdns_ip = "192.168.1.10"        # address that name points at (default: this machine's address)
+# allowed_hosts = ["myserver.lan"]   # extra names you open the dashboard by; its own names and addresses always work
 
 [network]
 # router = "192.168.1.1"          # default: this machine's default route
@@ -20,7 +21,7 @@
 # device_every = 60               # seconds between checks of known devices
 # pings_per_check = 3             # pings per device check
 # sweep_every = 600               # seconds between sweeps for new devices (1 ping per address)
-# speedtest_mb = 25               # speed test download size
+# speedtest_mb = 25               # speed test download size (up to 200)
 # dns_names = ["google.com", "bbc.co.uk", "github.com"]   # names to time website lookups with
 
 # What "the internet" means. The first one is drawn on the chart.
@@ -53,7 +54,7 @@
 # offline_after = 120             # seconds a wifi point can be silent before you're told
 
 # [logs]
-# max_mb = 100                    # each log is rotated to .old at this size
+# max_mb = 100                    # each log is rotated to .old at this size (up to 2000)
 
 # Your own names for devices and wifi points, by address. Shown everywhere instead of ".138" or a network name.
 # [names]
