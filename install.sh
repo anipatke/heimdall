@@ -61,6 +61,8 @@ After=network-online.target avahi-daemon.service
 User=$USER_NAME
 WorkingDirectory=$DIR
 ExecStart=/usr/bin/env python3 $DIR/server.py
+# show messages in journalctl straight away, not when a buffer fills
+Environment=PYTHONUNBUFFERED=1
 $EXTRA
 Restart=always
 RestartSec=5

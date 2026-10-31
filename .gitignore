@@ -3,3 +3,5 @@ __pycache__/
 devices.csv
 state.json
 heimdall.toml
+*.old
+state.json.tmp
