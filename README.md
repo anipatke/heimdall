@@ -91,6 +91,7 @@ change only what you need:
 | `sweep_every` | 600 | Seconds between sweeps for new devices |
 | `dns_names` | a few big sites | Names used to time website lookups |
 | `[checks.internet]` | Cloudflare, Google | Servers that stand in for "the internet" |
+| `[names]` | | Your own names for devices and wifi points, by address |
 | `[[kinds]]` | | Your own rules for naming device types |
 
 Environment variables `PORT`, `HOST`, `ROUTER`, `MDNS_NAME` and `MDNS_IP`

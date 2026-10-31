@@ -27,7 +27,7 @@ def load_config():
     for key in ("port", "host", "router", "mdns_name", "mdns_ip"):
         if os.environ.get(key.upper()):
             flat[key] = os.environ[key.upper()]
-    return flat, cfg.get("kinds", [])
+    return flat, cfg.get("kinds", []), cfg.get("names", {})
 
 
 def default_route():
@@ -39,7 +39,7 @@ def default_route():
     return m.group(1), m.group(2)
 
 
-CFG, EXTRA_KINDS = load_config()
+CFG, EXTRA_KINDS, NAMES = load_config()  # NAMES: address -> your own name for it, from [names]
 _router, _dev = default_route()
 PORT = int(CFG.get("port", 8765))
 HOST = CFG.get("host", "0.0.0.0")
@@ -296,6 +296,7 @@ def scan_loop():
                         name = socket.gethostbyaddr(ip)[0].removesuffix(".lan")
                     except OSError:
                         name = ""
+                    name = NAMES.get(ip, name)
                     vendor = vendor_of(macs.get(ip))
                     d = devices[ip] = {"ip": ip, "name": name, "vendor": vendor, "kind": kind_of(ip, name, vendor), "first": now, "rtt": [], "online": False}
                 if not d["online"]:
@@ -411,7 +412,7 @@ def mesh_loop():
             old = mesh.get(ip)
             with lock:
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
-                    name = "Router" if ip == ROUTER else f"Wifi point .{ip.rsplit('.', 1)[1]}"
+                    name = NAMES.get(ip) or ("Router" if ip == ROUTER else f"Wifi point .{ip.rsplit('.', 1)[1]}")
                     events.append({"t": now, "ip": ip, "name": name, "what": "restarted"})
                 mesh[ip] = {"ip": ip, "at": now, "uptime": up, "role": sysinfo.get("groupRole"), "model": sysinfo.get("modelId"),
                             "wired": sysinfo.get("lan0Link"), "led": sysinfo.get("ledAnimation"),
@@ -457,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the device list only changes once a minute, so skip it if the page already has this one
                 devs = None if seen_scan == state["last_scan"] else [{**d, "rtt": d["rtt"][-10:]} for d in devices.values()]
                 evs = events[-30:]
-            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "points": sorted(points), "mesh": list(mesh.values()),
+            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "points": sorted(points), "mesh": list(mesh.values()),
                                   "devices": devs, "events": evs, "host": socket.gethostname(), **state},
                                  separators=(",", ":")).encode(), "application/json")
         elif url.path == "/speedtest":
@@ -476,6 +477,7 @@ if __name__ == "__main__":
         devices.update(saved["devices"])
         events.extend(saved["events"])
         for d in devices.values():
+            d["name"] = NAMES.get(d["ip"], d["name"])
             d.pop("tries", None)  # give identification another go after a restart
             if d["kind"] == "Wifi point":
                 add_point(d["ip"])
