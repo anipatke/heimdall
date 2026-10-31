@@ -18,6 +18,8 @@ phone, and you get:
 - **Live lines**: response time of the router, wifi points and internet over the last hour
 - **Comings and goings**: devices joining, leaving and restarting
 - **A speed test**, on demand
+- **Alerts** on WhatsApp, Signal or ntfy when the internet drops, a wifi point
+  stops answering or restarts, or a new device joins (optional)
 
 It's one Python file and one HTML page. No packages to install, no accounts, no
 cloud. Nothing leaves your network except pings and a few website lookups (DNS) to check
@@ -91,6 +93,7 @@ change only what you need:
 | `sweep_every` | 600 | Seconds between sweeps for new devices |
 | `dns_names` | a few big sites | Names used to time website lookups |
 | `[checks.internet]` | Cloudflare, Google | Servers that stand in for "the internet" |
+| `[alerts]` | off | Where to send alerts; see below |
 | `[names]` | | Your own names for devices and wifi points, by address |
 | `[[kinds]]` | | Your own rules for naming device types |
 
@@ -100,6 +103,36 @@ override the file, and `HEIMDALL_CONFIG` points at a different settings file.
 Devices are named from what they call themselves on the network. If yours show
 up as "Unknown", add a `[[kinds]]` rule. For example, `match = "^living-room"`
 with `kind = "TV"`.
+
+## Alerts
+
+Heimdall can message you when:
+
+- the internet has been down for a minute (and when it's back, with how long it lasted)
+- a wifi point hasn't answered for 2 minutes (and when it's back)
+- the router or a wifi point restarts
+- a device it has never seen before joins your network
+
+If Heimdall's own connection drops, it stays quiet rather than blaming everything else.
+
+Add a `url` under `[alerts]` in `heimdall.toml`. Any `{text}` in it is replaced with the
+message; without `{text}`, the message is sent as the body of a POST.
+
+**WhatsApp or Signal** via [CallMeBot](https://www.callmebot.com), free for personal use:
+follow their instructions to send their number a message from your phone, and they reply with
+your key. Then:
+
+```toml
+[alerts]
+url = "https://api.callmebot.com/whatsapp.php?phone=+61400000000&apikey=123456&text={text}"
+# Signal: https://signal.callmebot.com/signal/send.php?phone=+61400000000&apikey=123456&text={text}
+```
+
+**ntfy**: install the [ntfy app](https://ntfy.sh), subscribe to a topic name nobody would
+guess, then `url = "https://ntfy.sh/that-topic"`.
+
+Check it works with `python3 server.py --test-alert`, then restart Heimdall
+(`sudo systemctl restart heimdall`). Alert text goes through whichever service you choose.
 
 ## What it does to your network
 
@@ -125,7 +158,8 @@ them and how quickly they answer. It can't see what they do online or how much
 data each uses; your router keeps that to itself.
 
 Readings are kept on the machine running Heimdall, in `log.csv`, `devices.csv`
-and `state.json` next to `server.py`, and never sent anywhere. Each log is
+and `state.json` next to `server.py`, and never sent anywhere. If you turn on
+alerts, only the alert messages leave your network. Each log is
 capped at 100 MB. When it fills up it's renamed to `.old`, replacing the
 previous one, so the logs never take more than about 400 MB.
 

@@ -9,8 +9,8 @@ import ipaddress, json, os, random, re, socket, struct, subprocess, threading, t
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-from urllib.request import urlopen
+from urllib.parse import urlparse, parse_qs, quote
+from urllib.request import urlopen, Request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -23,7 +23,7 @@ def load_config():
             cfg = tomllib.load(f)
     except FileNotFoundError:
         cfg = {}
-    flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {})}
+    flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {}), "alerts": cfg.get("alerts", {})}
     for key in ("port", "host", "router", "mdns_name", "mdns_ip"):
         if os.environ.get(key.upper()):
             flat[key] = os.environ[key.upper()]
@@ -91,6 +91,8 @@ LOG = os.path.join(HERE, "log.csv")
 DEVICE_LOG = os.path.join(HERE, "devices.csv")
 SAVED = os.path.join(HERE, "state.json")  # device list kept across restarts
 LOG_MAX = 100_000_000  # bytes; a full log moves to .old, so each log takes at most twice this
+ALERTS = CFG["alerts"]  # url: where alerts go ({text} in it is filled in); offline_after: seconds before a wifi point counts as gone
+START = time.time()
 
 lock = threading.Lock()
 log_lock = threading.Lock()
@@ -99,6 +101,8 @@ state = {"link": None, "speed": None, "speed_running": False, "last_scan": None,
 devices = {}          # ip -> {ip, name, mac, kind, first, last, online, rtt: [(t, avg, max, lost)]}
 events = []           # {t, ip, name, what: joined|left}
 points = set()        # wifi points getting nonstop checks
+last_ok = {}          # kind -> when it last answered
+restored = False      # devices came from state.json, so anything new on the first scan really is new
 mesh = {}             # ip -> what the router / wifi point says about itself (its local status page)
 
 
@@ -121,7 +125,52 @@ def record(kind, value):
         q.append((now, value))
         while q and q[0][0] < now - KEEP:
             q.popleft()
+        if value is not None:
+            last_ok[kind] = now
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
+
+
+def send_alert(text):
+    """Send one alert to [alerts] url. With {text} in the url it's a GET with the message filled in (WhatsApp or
+    Signal via CallMeBot); otherwise the message is POSTed as the body (ntfy and most webhooks). Returns an error or None."""
+    text = f"Heimdall: {text}"
+    url = ALERTS["url"]
+    try:
+        req = url.replace("{text}", quote(text, safe="")) if "{text}" in url else Request(url, data=text.encode())
+        with urlopen(req, timeout=20) as r:
+            r.read()
+    except Exception as e:
+        return f"Couldn't send alert: {e}"
+
+
+def alert(text):
+    print(f"Alert: {text}", flush=True)
+    if ALERTS.get("url"):
+        threading.Thread(target=lambda: (err := send_alert(text)) and print(err, flush=True), daemon=True).start()
+
+
+def point_label(ip):
+    return f"{NAMES[ip]} wifi point" if ip in NAMES else f"Wifi point .{ip.rsplit('.', 1)[1]}"
+
+
+def alert_loop():
+    """Every 10 s: has the internet or a wifi point gone quiet, or come back? One alert each way, not one per minute."""
+    gone = {}  # what -> when it went quiet, for things we've alerted about
+    after = int(ALERTS.get("offline_after", 120))
+    while True:
+        time.sleep(10)
+        now = time.time()
+        quiet = lambda kind: now - last_ok.get(kind, START)
+        checks = {"The internet": (min(quiet(k) for k in TARGETS if k != "router"), 60)}
+        checks |= {point_label(ip): (quiet(f"point:{ip}"), after) for ip in list(points)}
+        # if even the router is silent, it's Heimdall's own connection that's down, so don't blame anything else
+        heimdall_ok = quiet("router") < 30
+        for what, (silent, limit) in checks.items():
+            if what not in gone and silent >= limit and heimdall_ok:
+                gone[what] = now - silent
+                alert(f"{what} is {'down' if what == 'The internet' else 'not answering'} (nothing for {round(silent / 60)} min)")
+            elif what in gone and silent < 15:
+                alert(f"{what} is back, after {max(1, round((now - gone.pop(what)) / 60))} min")
 
 
 def forever(job, *args):
@@ -298,6 +347,8 @@ def scan_loop():
                         name = ""
                     name = NAMES.get(ip, name)
                     vendor = vendor_of(macs.get(ip))
+                    if (state["last_scan"] or restored) and macs.get(ip) not in {x.get("mac") for x in devices.values()}:
+                        alert(f"New device joined: {name or 'no name'} ({vendor or 'unknown maker'}) at {ip}")
                     d = devices[ip] = {"ip": ip, "name": name, "vendor": vendor, "kind": kind_of(ip, name, vendor), "first": now, "rtt": [], "online": False}
                 if not d["online"]:
                     d["online"] = True
@@ -414,6 +465,7 @@ def mesh_loop():
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
                     name = NAMES.get(ip) or ("Router" if ip == ROUTER else f"Wifi point .{ip.rsplit('.', 1)[1]}")
                     events.append({"t": now, "ip": ip, "name": name, "what": "restarted"})
+                    alert(f"{'Router' if ip == ROUTER else point_label(ip)} restarted")
                 mesh[ip] = {"ip": ip, "at": now, "uptime": up, "role": sysinfo.get("groupRole"), "model": sysinfo.get("modelId"),
                             "wired": sysinfo.get("lan0Link"), "led": sysinfo.get("ledAnimation"),
                             "version": sw.get("softwareVersion"), "update": sw.get("updateRequired") or sw.get("updateStatus") not in (None, "idle"),
@@ -471,10 +523,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if "--test-alert" in sys.argv:
+        err = send_alert("test alert. If you can read this, alerts work.") if ALERTS.get("url") else "No url under [alerts] in heimdall.toml."
+        if err:
+            raise SystemExit(err)
+        print("Sent. Check your phone.")
+        raise SystemExit
     try:
         with open(SAVED) as f:
             saved = json.load(f)
         devices.update(saved["devices"])
+        restored = bool(devices)
         events.extend(saved["events"])
         for d in devices.values():
             d["name"] = NAMES.get(d["ip"], d["name"])
@@ -487,7 +546,7 @@ if __name__ == "__main__":
         pass
     for n, h in TARGETS.items():
         forever(pinger, n, h)
-    for job in (dns_loop, link_loop, scan_loop, mesh_loop):
+    for job in (dns_loop, link_loop, scan_loop, mesh_loop, alert_loop):
         forever(job)
     if MDNS_NAME:
         forever(mdns_loop, MDNS_NAME, MDNS_IP)
