@@ -13,6 +13,9 @@ from urllib.parse import urlparse, urlsplit, parse_qs, quote
 from urllib.request import urlopen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Logs, saved state and settings: next to server.py, or (installed as a service) /var/lib/heimdall, where only the
+# heimdall user can write and the code itself stays read-only to it
+DATA = os.environ.get("HEIMDALL_DATA") or HERE
 # ping and ip output is parsed, so keep it in English whatever the system language. Anthropic settings (an API key,
 # if run by hand) stay out of every child process's environment.
 C_LOCALE = {**{k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}, "LC_ALL": "C"}
@@ -68,7 +71,7 @@ def no_constants(name):
     raise ValueError(f"{name} isn't allowed")
 
 
-CONFIG = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
+CONFIG = os.environ.get("HEIMDALL_CONFIG", os.path.join(DATA, "heimdall.toml"))
 
 # What the settings page can change: (section, key) -> (default, lowest, highest). A list default means
 # [good, fair, poor] limits: under each number is that level. Port, address and router stay file-only,
@@ -184,9 +187,9 @@ TARGETS = {"router": ROUTER, **CFG.get("internet", {"cloudflare": "1.1.1.1", "go
 INET0 = next((k for k in TARGETS if k != "router"), None)  # "the internet" for charts and trends
 DNS_NAMES = CFG.get("dns_names", ["google.com", "netflix.com", "amazon.com", "bbc.co.uk", "github.com", "reddit.com", "spotify.com"])
 KEEP = 3600  # seconds of history held in memory
-LOG = os.path.join(HERE, "log.csv")
-DEVICE_LOG = os.path.join(HERE, "devices.csv")
-SAVED = os.path.join(HERE, "state.json")  # device list kept across restarts
+LOG = os.path.join(DATA, "log.csv")
+DEVICE_LOG = os.path.join(DATA, "devices.csv")
+SAVED = os.path.join(DATA, "state.json")  # device list kept across restarts
 LOG_MAX = int(float(conf("logs", "max_mb")) * 1_000_000)  # a full log moves to .old, so each log takes at most twice this
 ALERTS = RAW.get("alerts", {})  # url: where alerts go ({text} in it is filled in); on: which kinds of alert
 ALERT_ON = set(ALERTS.get("on", ALL_ALERTS))
@@ -238,7 +241,7 @@ def add_event(e):
 
 # ---- Trends: every reading rolled up by the hour and kept for two weeks, for the Day and Week views and the
 # daily / weekly summaries. Small enough to keep in memory and save every few minutes, whatever the ping rate.
-TRENDS = os.path.join(HERE, "trends.json")
+TRENDS = os.path.join(DATA, "trends.json")
 TREND_KEEP = 15 * 86400  # two full weeks, so a week can be compared with the one before
 SPELL_GAP = 60           # bad readings closer together than this are one problem spell
 NAPPERS = {"Phone", "Tablet", "Smart-home gadget", "Smart speaker", "Appliance", "Printer", "Unknown"}  # as on the page
