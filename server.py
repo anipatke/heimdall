@@ -5,7 +5,7 @@ if sys.version_info < (3, 11):
     raise SystemExit("Heimdall needs Python 3.11 or newer.")
 if not (shutil.which("ip") and shutil.which("ping")):
     raise SystemExit("Heimdall needs the ip and ping commands (Linux).")
-import http.client, ipaddress, json, math, os, random, re, socket, ssl, struct, subprocess, threading, time, tomllib, csv
+import http.client, ipaddress, json, math, os, random, re, signal, socket, ssl, struct, subprocess, threading, time, tomllib, csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -13,7 +13,9 @@ from urllib.parse import urlparse, urlsplit, parse_qs, quote
 from urllib.request import urlopen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-C_LOCALE = {**os.environ, "LC_ALL": "C"}  # ping and ip output is parsed, so keep it in English whatever the system language
+# ping and ip output is parsed, so keep it in English whatever the system language. Anthropic settings (an API key,
+# if run by hand) stay out of every child process's environment.
+C_LOCALE = {**{k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}, "LC_ALL": "C"}
 
 
 def http_fetch(host, port, path, *, addr=None, https=False, data=None, timeout=5, limit=65536):
@@ -89,9 +91,10 @@ EDITABLE = {
     ("thresholds", "device_missed"): ([10, 34], 1, 100),  # % missed: "missing replies", "not answering"
     ("alerts", "internet_after"): (60, 10, 86400),
     ("alerts", "offline_after"): (120, 10, 86400),
+    ("alerts", "summary_hour"): (8, 0, 23),  # local hour the daily summary (and Monday's weekly one) is sent
     ("logs", "max_mb"): (100, 1, 2000),
 }
-ALL_ALERTS = ["internet", "wifi_points", "restarts", "new_devices"]
+ALL_ALERTS = ["internet", "wifi_points", "restarts", "new_devices", "daily_summary", "weekly_summary"]
 
 
 def load_config():
@@ -178,6 +181,7 @@ def vendor_of(mac):
 
 # what "the internet" means: a couple of big, always-up servers
 TARGETS = {"router": ROUTER, **CFG.get("internet", {"cloudflare": "1.1.1.1", "google": "8.8.8.8"})}
+INET0 = next((k for k in TARGETS if k != "router"), None)  # "the internet" for charts and trends
 DNS_NAMES = CFG.get("dns_names", ["google.com", "netflix.com", "amazon.com", "bbc.co.uk", "github.com", "reddit.com", "spotify.com"])
 KEEP = 3600  # seconds of history held in memory
 LOG = os.path.join(HERE, "log.csv")
@@ -222,6 +226,617 @@ def record(kind, value):
         if value is not None:
             last_ok[kind] = now
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
+    tally(now, kind, value)
+
+
+def add_event(e):
+    """A device joined or left, or a unit restarted: for the live feed and for trends. Caller holds `lock`."""
+    events.append(e)
+    with trend_lock:
+        trends["events"].append([e["t"], e["what"], e["ip"], e["name"]])
+
+
+# ---- Trends: every reading rolled up by the hour and kept for two weeks, for the Day and Week views and the
+# daily / weekly summaries. Small enough to keep in memory and save every few minutes, whatever the ping rate.
+TRENDS = os.path.join(HERE, "trends.json")
+TREND_KEEP = 15 * 86400  # two full weeks, so a week can be compared with the one before
+SPELL_GAP = 60           # bad readings closer together than this are one problem spell
+NAPPERS = {"Phone", "Tablet", "Smart-home gadget", "Smart speaker", "Appliance", "Printer", "Unknown"}  # as on the page
+trend_lock = threading.Lock()
+# hours: local hour start -> {"k": {kind: [n, lost, sum, min, max, {bin: count}]}, "on": devices on,
+#        "d": {ip: [checks, ignored pings, pings sent, pings lost, ms sum, ms count]}}
+# events: [t, what, ip, name]; spells: problem spells that ended; names: ip -> [name, kind]; sent: summary -> date
+trends = {"hours": {}, "events": [], "spells": [], "names": {}, "sent": {}, "wifi": False}
+spells = {}              # spells still going: "home" (the router) / "internet"
+
+
+def hour_start(t):
+    """Start of t's hour in local time (right for half-hour time zones too)."""
+    lt = time.localtime(t)
+    return int(t) - lt.tm_min * 60 - lt.tm_sec
+
+
+def hbin(ms):
+    """Response times go in bins 25% apart, so percentiles come out within a few percent from a few dozen numbers."""
+    return 0 if ms <= 0.1 else min(80, int(math.log(ms / 0.1, 1.25)))
+
+
+def hval(i):
+    return 0.1 * 1.25 ** (i + 0.5)
+
+
+def on_wifi():
+    link = state["link"]
+    return link["type"] == "wifi" if link else trends["wifi"]
+
+
+def bad_limit(kind):
+    """Over this a reading counts as a problem: the top of "poor" for that kind, as the dashboard judges it."""
+    rt = THRESHOLDS["router_wifi" if on_wifi() else "router"][2]
+    if kind == "router":
+        return rt
+    if kind.startswith("point:"):
+        return rt + THRESHOLDS["wifi_point_extra"][2]
+    if kind == "dns":
+        return THRESHOLDS["lookups"]
+    return THRESHOLDS["internet"][2]
+
+
+def tally(t, kind, value):
+    """Add one reading to its hour, and follow problem spells: the router going slow or silent (inside your home),
+    and the internet doing so (your provider's, unless the router was struggling at the same time)."""
+    with trend_lock:
+        b = trends["hours"].setdefault(str(hour_start(t)), {"k": {}})
+        s = b["k"].setdefault(kind, [0, 0, 0.0, None, None, {}])
+        s[0] += 1
+        if value is None:
+            s[1] += 1
+        else:
+            s[2] += value
+            s[3] = value if s[3] is None else min(s[3], value)
+            s[4] = value if s[4] is None else max(s[4], value)
+            if kind not in ("signal", "download_mbps"):
+                i = str(hbin(value))
+                s[5][i] = s[5].get(i, 0) + 1
+        if kind not in ("router", INET0):
+            return
+        # internet spells that overlap trouble at the router are the home's doing; the report sorts that out. The router
+        # is also held to the internet's own limit for this ("near"), so a router a bit slow over wifi still counts.
+        follow("home" if kind == "router" else "internet", t, value is None or value > bad_limit(kind), value)
+        if kind == "router":
+            follow("near", t, value is None or value > bad_limit(INET0), value)
+
+
+def follow(kind, t, bad, value):
+    sp = spells.get(kind)
+    if sp and t - sp["end"] > SPELL_GAP:
+        end_spell(kind)
+        sp = None
+    if bad:
+        if not sp:
+            sp = spells[kind] = {"type": kind, "start": t, "end": t, "bad": 0, "lost": 0, "worst": 0}
+        sp["end"] = t
+        sp["bad"] += 1
+        sp["lost"] += value is None
+        sp["worst"] = max(sp["worst"], value or 0)
+
+
+def end_spell(kind):
+    sp = spells.pop(kind, None)
+    if sp and (sp["bad"] >= 3 or kind == "near"):  # one or two slow replies are a blip, not a problem
+        trends["spells"].append(sp)
+
+
+def tally_scan(t, rows, online):
+    """One device check: rows of (ip, name, kind, avg ms, lost pings; -1 = there, but ignores pings)."""
+    with trend_lock:
+        b = trends["hours"].setdefault(str(hour_start(t)), {"k": {}})
+        b["on"] = max(b.get("on", 0), online)
+        ds = b.setdefault("d", {})
+        for ip, name, kind, avg, lost in rows:
+            trends["names"][ip] = [name, kind]
+            s = ds.setdefault(ip, [0, 0, 0, 0, 0.0, 0])
+            s[0] += 1
+            if lost < 0:
+                s[1] += 1
+            else:
+                s[2] += PINGS_PER_CHECK
+                s[3] += lost
+            if avg is not None:
+                s[4] += avg
+                s[5] += 1
+
+
+def save_trends():
+    cut = time.time() - TREND_KEEP
+    with trend_lock:
+        trends["hours"] = {h: b for h, b in trends["hours"].items() if int(h) >= cut}
+        trends["events"] = [e for e in trends["events"] if e[0] >= cut]
+        trends["spells"] = [e for e in trends["spells"] if e["end"] >= cut]
+        text = json.dumps(trends, separators=(",", ":"))
+    with open(TRENDS + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(TRENDS + ".tmp", TRENDS)
+
+
+def load_trends(build=True):
+    """Trends saved last time, or (the first time) built from the logs Heimdall already has."""
+    try:
+        with open(TRENDS) as f:
+            saved = json.load(f)
+        if isinstance(saved, dict) and isinstance(saved.get("hours"), dict):
+            trends.update(saved)
+            return True
+    except (OSError, ValueError):
+        pass
+    if not build:
+        return False
+    print("Building trends from the logs so far (once only)…", flush=True)
+    cache = {}
+
+    def when(stamp):  # many readings share a timestamp; parsing each one is the slow part
+        if stamp not in cache:
+            if len(cache) > 1000:
+                cache.clear()
+            cache[stamp] = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+        return cache[stamp]
+
+    def rows(path):
+        for p in (path + ".old", path):
+            try:
+                with open(p, newline="") as f:
+                    yield from csv.reader(f)
+            except OSError:
+                pass
+    for r in rows(LOG):
+        try:
+            t, v = when(r[0]), float(r[2]) if r[2] else None
+        except (ValueError, IndexError):
+            continue
+        if r[1] == "signal":
+            trends["wifi"] = True
+        tally(t, r[1], v)
+    for kind in list(spells):
+        end_spell(kind)
+    scan, stamp = [], None
+
+    def flush():
+        if scan:
+            tally_scan(when(stamp), scan, sum(1 for r in scan if r[3] is not None or r[4] < 0))
+    for r in rows(DEVICE_LOG):
+        try:
+            row = (r[1], r[2], r[3], float(r[4]) if r[4] else None, int(float(r[6])))
+            if r[0] != stamp:
+                flush()
+                scan, stamp = [], r[0]
+            scan.append(row)
+        except (ValueError, IndexError):
+            continue
+    flush()
+    trends["events"] = [[e["t"], e["what"], e["ip"], e["name"]] for e in events]
+    save_trends()
+    return True
+
+
+def merged(buckets, kind):
+    """Several hours of one kind, summed and summarised: typical, slow (95%), worst, % lost, % slow or lost."""
+    n = lost = 0
+    total, lo, hi, hist = 0.0, None, None, {}
+    for b in buckets:
+        s = b["k"].get(kind)
+        if not s:
+            continue
+        n, lost, total = n + s[0], lost + s[1], total + s[2]
+        if s[3] is not None:
+            lo, hi = (s[3], s[4]) if lo is None else (min(lo, s[3]), max(hi, s[4]))
+        for i, c in s[5].items():
+            hist[int(i)] = hist.get(int(i), 0) + c
+    if not n:
+        return None
+    ok = n - lost
+    out = {"n": n, "loss": round(100 * lost / n, 2), "max": hi, "min": lo}
+    if kind in ("signal", "download_mbps"):
+        return {**out, "mean": round(total / ok, 1) if ok else None}
+    bins = sorted(hist.items())
+
+    def pct(p):
+        run = 0
+        for i, c in bins:
+            run += c
+            if run >= p * ok:
+                return round(min(max(hval(i), lo), hi), 1)
+        return hi
+    limit = hbin(bad_limit(kind))
+    badn = lost + sum(c for i, c in bins if i > limit)
+    return {**out, "med": pct(.5) if ok else None, "p95": pct(.95) if ok else None,
+            "bad": round(100 * badn / n, 2), "badn": badn}
+
+
+def dur(s):
+    s = round(s)
+    return f"{s} s" if s < 90 else f"{round(s / 60)} min" if s < 5400 else f"{s // 3600} h {round(s % 3600 / 60)} min"
+
+
+def fmt_ms(v):
+    return "–" if v is None else f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.1f} ms" if v < 10 else f"{round(v)} ms"
+
+
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def unit_name(ip):
+    return "The router" if ip == ROUTER else point_label(ip)
+
+
+def trend_report(days):
+    """The last `days` days, hour by hour, against the same stretch before it, with a plain-English read."""
+    now = time.time()
+    start = hour_start(now) - (days * 24 - 1) * 3600
+    before = start - days * 86400
+    with trend_lock:
+        H = {int(h): b for h, b in trends["hours"].items() if int(h) >= before}
+        found = [{**e, "secs": e["end"] - e["start"] + PING_EVERY}
+                 for e in trends["spells"] + list(spells.values()) if e["end"] >= start - SPELL_GAP and (e["bad"] >= 3 or e["type"] == "near")]
+        evs = [e for e in trends["events"] if e[0] >= start]
+        names = dict(trends["names"])
+    cur = [b for h, b in H.items() if h >= start]
+    prev = [b for h, b in H.items() if h < start]
+    kinds = sorted({k for b in H.values() for k in b["k"]})
+    hours, t = [], start
+    while t <= now:
+        b = H.get(t)
+        hours.append({"t": t, "on": b.get("on") if b else None, "k": {k: merged([b], k) for k in b["k"]} if b else {}})
+        t += 3600
+    covered = lambda bs: sum(1 for b in bs if b["k"].get("router"))
+
+    def devs(bs):
+        out = {}
+        for b in bs:
+            for ip, v in b.get("d", {}).items():
+                o = out.setdefault(ip, [0] * 6)
+                for j in range(6):
+                    o[j] += v[j]
+        return out
+    dc, dp = devs(cur), devs(prev)
+    miss = lambda v: round(100 * v[3] / v[2], 1) if v and v[2] else None
+    devices = [{"ip": ip, "name": names.get(ip, ["", "Unknown"])[0], "kind": names.get(ip, ["", "Unknown"])[1], "checks": v[0],
+                "quiet": v[1], "missed": miss(v), "avg": round(v[4] / v[5], 1) if v[5] else None, "prev_missed": miss(dp.get(ip))}
+               for ip, v in dc.items()]
+    # devices leaving together, in the same check, usually means a wifi point or the router blinked
+    drops, group = [], []
+    for e in sorted((e for e in evs if e[1] == "left"), key=lambda e: e[0]) + [[math.inf]]:
+        if group and e[0] - group[0][0] > 5:
+            if len(group) >= 4:
+                drops.append({"t": group[0][0], "names": [g[3] or g[2] for g in group]})
+            group = []
+        group.append(e)
+    restarts = [{"t": e[0], "ip": e[2]} for e in evs if e[1] == "restarted"]
+    # an internet spell during trouble at the router is the home network's: only those clear of it are the provider's
+    home = [e for e in found if e["type"] != "internet"]
+    found = [e for e in found if e["end"] >= start and (e["type"] == "home" or e["type"] == "internet" and not any(
+        h["start"] - SPELL_GAP <= e["end"] and e["start"] <= h["end"] + SPELL_GAP for h in home))]
+    found.sort(key=lambda e: e["start"])
+    for e in found:  # what else happened around each spell
+        e["notes"] = [f"{len(d['names'])} devices dropped off" for d in drops if e["start"] - 300 <= d["t"] <= e["end"] + 300] + \
+                     [f"{unit_name(r['ip'])} restarted" for r in restarts if e["start"] - 300 <= r["t"] <= e["end"] + 300]
+    rep = {"days": days, "start": start, "now": now, "hours": hours, "covered": covered(cur), "prev_covered": covered(prev),
+           "cur": {k: merged(cur, k) for k in kinds}, "prev": {k: merged(prev, k) for k in kinds},
+           "spells": found, "drops": drops, "restarts": restarts, "devices": devices,
+           "joined": sum(e[1] == "joined" for e in evs), "left": sum(e[1] == "left" for e in evs),
+           "points": sorted(k[6:] for k in kinds if k.startswith("point:")), "inet": INET0, "router": ROUTER,
+           "names": NAMES, "thresholds": THRESHOLDS, "wifi": on_wifi(), "ping_every": PING_EVERY}
+    rep["headline"], rep["findings"] = findings(rep)
+    return rep
+
+
+def findings(rep):
+    """(headline, [{l: level, area, text}]): what went wrong, where and when, worst first."""
+    days, cur, prev = rep["days"], rep["cur"], rep["prev"]
+    label = "in the last 24 hours" if days == 1 else "in the last 7 days"
+    when = lambda t: time.strftime("%H:%M" if days == 1 else "%a %H:%M", time.localtime(t))
+    r, i = cur.get("router"), cur.get(rep["inet"])
+    if not r:
+        return "No readings yet for this stretch.", []
+    out = []
+    add = lambda l, area, text: out.append({"l": l, "area": area, "text": text})
+    hours = days * 24
+    if rep["covered"] < hours * 0.9:
+        add("off", "coverage", f"Heimdall was running for {rep['covered']} of the last {hours} hours, so this is a partial picture.")
+
+    def level(secs):  # share of the watched time spent in problem spells
+        share = 100 * secs / max(1, rep["covered"] * 3600)
+        return "warning" if share < 0.5 else "serious" if share < 2 else "critical"
+
+    he = [e for e in rep["spells"] if e["type"] == "home"]
+    ie = [e for e in rep["spells"] if e["type"] == "internet"]
+    if i:
+        if not ie:
+            add("good", "internet", f"Your internet provider was solid: typically {fmt_ms(i['med'])}, and nothing went wrong beyond your router.")
+        else:
+            tot, worst = sum(e["secs"] for e in ie), max(ie, key=lambda e: e["secs"])
+            add(level(tot), "internet", f"Your internet provider had {plural(len(ie), 'problem spell')} while your home network was fine, "
+                f"{dur(tot)} in all. The longest was {dur(worst['secs'])} at {when(worst['start'])}.")
+    if not he:
+        add("good", "home", f"Your home network was steady: the router typically answered in {fmt_ms(r['med'])}.")
+    else:
+        tot, worst = sum(e["secs"] for e in he), max(he, key=lambda e: e["secs"])
+        text = (f"Your home network stalled {plural(len(he), 'time')}, {dur(tot)} in all "
+                f"({100 * tot / max(1, rep['covered'] * 3600):.1f}% of the time). The longest was {dur(worst['secs'])} at "
+                f"{when(worst['start'])}, with replies taking up to {fmt_ms(max(e['worst'] for e in he))}.")
+        # is it bunched at one time of day? (evenings usually mean a busy network)
+        by_hour = [0.0] * 24
+        for e in he:
+            by_hour[time.localtime(e["start"]).tm_hour] += e["secs"]
+        h0 = max(range(24), key=lambda h: by_hour[h] + by_hour[(h + 1) % 24] + by_hour[(h + 2) % 24])
+        share = sum(by_hour[(h0 + k) % 24] for k in range(3)) / tot
+        if share >= 0.5 and len(he) >= 3:
+            text += f" Most of it ({share:.0%}) came between {h0:02d}:00 and {(h0 + 3) % 24:02d}:00"
+            if days > 1:
+                on = {time.strftime("%a", time.localtime(e["start"])) for e in he if (time.localtime(e["start"]).tm_hour - h0) % 24 < 3}
+                text += f", on {plural(len(on), 'day')}"
+            text += "."
+        add(level(tot), "home", text)
+    pts = [(ip, cur[f"point:{ip}"]) for ip in rep["points"] if cur.get(f"point:{ip}")]
+    if pts:
+        lossy = sorted(pts, key=lambda p: (p[1]["loss"], p[1]["bad"]), reverse=True)
+        ip, w = lossy[0]
+        rest = [s for p, s in pts if p != ip]
+        loss_lim = THRESHOLDS["loss"]
+        if w["loss"] > loss_lim[0] and w["loss"] >= loss_lim[1] or (rest and w["bad"] > 2 * max(s["bad"] for s in rest) + 1):
+            hrs = [(h["t"], h["k"].get(f"point:{ip}")) for h in rep["hours"]]
+            peak = max((x for x in hrs if x[1]), key=lambda x: x[1]["loss"])
+            text = (f"{point_label(ip)} is your weakest point: it lost {w['loss']:.1f}% of replies"
+                    + (f" (the others {max(s['loss'] for s in rest):.1f}% at most)" if rest else "")
+                    + f", worst around {when(peak[0])} ({peak[1]['loss']:.0f}% that hour).")
+            p = prev.get(f"point:{ip}")
+            if p and rep["prev_covered"] >= 6:
+                text += f" The {'day' if days == 1 else 'week'} before it lost {p['loss']:.1f}%."
+            text += " If it's far from its nearest point, moving it closer or giving it a cable would steady the mesh."
+            add("serious" if w["loss"] >= loss_lim[2] else "warning", "points", text)
+        else:
+            add("good", "points", f"All {plural(len(pts), 'wifi point')} kept up, losing {max(s['loss'] for _, s in pts):.1f}% of replies at most.")
+        slow = max(pts, key=lambda p: p[1]["med"] or 0)
+        others = sorted(s["med"] for p, s in pts if p != slow[0] and s["med"] is not None)
+        if others and slow[1]["med"] is not None:
+            typical = others[len(others) // 2]
+            if slow[1]["med"] > 1.4 * typical and slow[1]["med"] - typical > 3:
+                add("warning", "points", f"{point_label(slow[0])} is consistently the slowest point ({fmt_ms(slow[1]['med'])} typically, "
+                    f"against {fmt_ms(typical)} for the rest), a sign its link to the rest of the mesh is weaker.")
+    for d in rep["drops"]:
+        names = ", ".join(d["names"][:4]) + ("…" if len(d["names"]) > 4 else "")
+        add("serious", "home", f"{len(d['names'])} devices dropped off at once at {when(d['t'])} ({names}). "
+            "That usually means a wifi point or the router briefly went down.")
+    for x in rep["restarts"]:
+        add("warning", "home", f"{unit_name(x['ip'])} restarted at {when(x['t'])}.")
+    flaky = [d for d in rep["devices"] if d["kind"] not in NAPPERS and d["checks"] >= 10 and d["missed"] is not None
+             and d["missed"] >= THRESHOLDS["device_missed"][0]]
+    if flaky:
+        add("warning", "devices", "Missing replies: " + ", ".join(f"{d['name'] or d['ip']} ({d['missed']:.0f}% of pings)" for d in flaky[:5]) + ".")
+    pr, pi = prev.get("router"), prev.get(rep["inet"])
+    if pr and rep["prev_covered"] >= 6:
+        a, b = pr["bad"], r["bad"]
+        trend = "about the same" if abs(a - b) < 0.3 or 0.8 <= (b + .01) / (a + .01) <= 1.25 else "better" if b < a else "worse"
+        text = f"Against the {'day' if days == 1 else 'week'} before, home stalls were {trend} ({a:.1f}% → {b:.1f}% of the time)"
+        if pi and i:
+            text += f", and the internet typically {fmt_ms(pi['med'])} → {fmt_ms(i['med'])}"
+        add("warning" if trend == "worse" else "good", "trend", text + ".")
+    if (s := cur.get("signal")) and s.get("mean") is not None:
+        if s["mean"] < -70:
+            add("warning", "heimdall", f"Heimdall's own wifi was weak ({s['mean']:.0f} dBm on average), which makes every reading look "
+                "worse than your network really is. Move it nearer a wifi point, or use a cable.")
+        elif rep["wifi"]:
+            add("off", "heimdall", f"Heimdall is on wifi ({s['mean']:.0f} dBm), so every reading includes its own hop. A cable would sharpen them.")
+    if (sp := cur.get("download_mbps")) and sp.get("mean"):
+        add("off", "internet", f"Speed tests: {sp['mean']:g} Mbps on average ({sp['min']:g} to {sp['max']:g}), from {plural(sp['n'], 'test')}.")
+    rank = {"critical": 0, "serious": 1, "warning": 2, "good": 3, "off": 4}
+    out.sort(key=lambda f: rank[f["l"]])
+    trouble = lambda areas: any(f["l"] in ("warning", "serious", "critical") for f in out if f["area"] in areas)
+    home, net = trouble({"home", "points"}), trouble({"internet"})
+    headline = (f"Your home network and your internet provider both had trouble {label}." if home and net
+                else f"Your internet was fine {label}; the trouble was inside your home." if home
+                else f"Your home network was fine {label}; your internet provider was the weak spot." if net
+                else f"All steady {label}.")
+    return headline, out
+
+
+def summary_text(rep):
+    lines = [rep["headline"]] + [f"• {f['text']}" for f in rep["findings"] if f["area"] != "coverage" or len(rep["findings"]) < 3]
+    link = f"http://{MDNS_NAME or MY_IP}" + ("" if PORT == 80 else f":{PORT}") + f"/#{'day' if rep['days'] == 1 else 'week'}"
+    text = "\n".join(lines)
+    return (text if len(text) < 1400 else text[:1400] + "…") + f"\nMore: {link}"
+
+
+# ---- Optional: Claude writes the report. Off unless an Anthropic API key is found, since it sends a summary of your
+# network (hourly figures, problem times, device names; no hardware addresses) to Anthropic.
+AI = RAW.get("ai", {})
+AI_MODEL = AI.get("model", "claude-opus-5-5")
+
+
+def ai_key():
+    """The key never lives in heimdall.toml (readable by anyone here, copied to .bak, rewritten by the settings page).
+    As a service it comes from a systemd credential (./install.sh --api-key): stored root-only, and while Heimdall
+    runs readable only by root and the user it runs as. Run by hand, from ANTHROPIC_API_KEY."""
+    if AI.get("on") is False:
+        return None
+    try:
+        with open(os.path.join(os.environ["CREDENTIALS_DIRECTORY"], "anthropic_key")) as f:
+            key = f.read().strip()
+    except (KeyError, OSError):
+        key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if key and not re.fullmatch(r"sk-ant-[A-Za-z0-9_-]+", key):
+        # a stray character would make the HTTP library reject the header, and its error message contains the key
+        print("The Anthropic API key isn't in the expected form (sk-ant-…), so Claude reports are off. Set it again "
+              "with ./install.sh --api-key.", flush=True)
+        return None
+    return key or None
+
+
+AI_KEY = ai_key()
+ai_running = set()
+
+
+def ai_entry(days):
+    """Claude's latest report for a stretch, kept in trends.json so it survives restarts:
+    {"at", "text", "model"} for the last report, plus "error" and "error_at" if the latest try failed."""
+    return trends.setdefault("ai", {}).setdefault(str(days), {})
+
+
+def ai_store(days, result):
+    """Keep a new report, or note a failed try without losing the last good report."""
+    with trend_lock:
+        e = ai_entry(days)
+        if result.get("text"):
+            e.clear()
+            e.update(result)
+        else:
+            e["error"], e["error_at"] = result.get("error"), result.get("at", time.time())
+
+
+def ai_write(days):
+    """Write one report for a stretch (no more than one at a time) and keep it."""
+    if days in ai_running:
+        return {}
+    ai_running.add(days)
+    try:
+        result = ai_report(days)
+    except Exception as e:
+        print(f"Claude report crashed: {e!r}", flush=True)
+        result = {"at": time.time(), "error": "Something went wrong; Heimdall's log has the details."}
+    finally:
+        ai_running.discard(days)
+    ai_store(days, result)
+    save_trends()
+    return result
+
+
+def ai_next(days):
+    """When the next report for a stretch is due: the summary hour every day (last 24 hours), or on Mondays (week)."""
+    hour, now = int(conf("alerts", "summary_hour")), time.time()
+    lt = time.localtime(now)
+    for k in range(9):
+        d = time.localtime(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + k, 12, 0, 0, 0, 0, -1)))  # noon: clear of clock changes
+        t = time.mktime((d.tm_year, d.tm_mon, d.tm_mday, hour, 0, 0, 0, 0, -1))
+        if t > now and (days == 1 or d.tm_wday == 0):
+            return t
+
+
+AI_SYSTEM = """You are the analyst inside Heimdall, a small dashboard that watches a home network from one Linux machine.
+You get a JSON summary of a stretch of readings and write a short report for the household: plain English, no jargon,
+like a knowledgeable friend explaining what happened on their network and what to do about it.
+
+What the data means:
+- Heimdall pings the router, each wifi point ("point:<address>"), and internet servers every few seconds. Per hour you get
+  med (typical ms), p95 (the slowest 5%), loss (% of pings unanswered) and bad (% of pings lost or slower than the
+  "poor" limit). "dns" is website lookups through the router. "signal" is Heimdall's own wifi signal in dBm.
+- spells: problem spells. type "home" = the router itself went slow or silent, so the trouble was inside the home
+  (wifi, mesh, router). type "internet" = the internet went bad while the router was fine: the provider. Each has
+  start/end (unix time), secs, worst ms, lost pings, and notes on what else happened then.
+- drops: several devices leaving in the same check, which usually means a wifi point or the router blinked.
+  restarts: a router or wifi point rebooted.
+- devices: per device, missed = % of pings unanswered. Phones, tablets, gadgets, speakers, appliances, printers and
+  unknown devices nap to save battery, so their misses and slow replies are normal and not worth mentioning.
+- If "wifi" is true Heimdall is itself on wifi, so every reading includes its own wireless hop; a weak signal
+  (below about -70 dBm) makes everything look worse than it is. Keep that in mind before blaming the network.
+- "prev" is the same-length stretch before, for comparison; prev_covered says how many hours of it were watched.
+- covered says how many hours Heimdall was actually running; missing hours mean no data, not a quiet network.
+- names maps addresses to the household's own names for units; findings are Heimdall's own rule-based notes.
+- Times: convert unix times to local times using the "tz" offset given and say them like "6:15 pm" or "Tuesday evening".
+
+Write:
+1. First, a summary of two or three sentences: the overall verdict and the single most useful thing to do. This is
+   sent to their phone on its own, so it must stand alone.
+2. Then short sections with "## " headings: what happened (the important patterns, with times), the likely causes
+   (separate what the data shows from what you are inferring), and what to try, most useful first. Add a comparison
+   with the stretch before if there is one worth mentioning.
+Be specific and honest about uncertainty. Don't pad: if all was well, say so briefly. Under 400 words. Markdown,
+but only headings, bullet lists and **bold**."""
+
+
+def ai_input(rep):
+    """The report, trimmed to what helps: per-hour figures for the network units, no hardware addresses."""
+    keep = {"router", rep["inet"], "dns", "signal", *(f"point:{p}" for p in rep["points"])}
+    slim = lambda s: s and {k: s[k] for k in ("n", "med", "p95", "loss", "bad", "max", "mean") if s.get(k) is not None}
+    return json.dumps({
+        "period": "last 24 hours" if rep["days"] == 1 else "last 7 days", "tz": time.strftime("%z"),
+        "now": round(rep["now"]), "covered": rep["covered"], "prev_covered": rep["prev_covered"], "wifi": rep["wifi"],
+        "router": rep["router"], "names": rep["names"], "ping_every_s": rep["ping_every"], "limits": rep["thresholds"],
+        "cur": {k: slim(v) for k, v in rep["cur"].items() if k in keep}, "prev": {k: slim(v) for k, v in rep["prev"].items() if k in keep},
+        "hours": [{"t": h["t"], "devices_on": h["on"], **{k: slim(v) for k, v in h["k"].items() if k in keep}} for h in rep["hours"] if h["k"]],
+        "spells": [{k: round(e[k]) if isinstance(e[k], float) else e[k] for k in ("type", "start", "end", "secs", "worst", "lost", "notes")} for e in rep["spells"]],
+        "drops": rep["drops"], "restarts": rep["restarts"], "joined": rep["joined"], "left": rep["left"],
+        "devices": [d for d in rep["devices"] if d["checks"] >= 10], "findings": [f["text"] for f in rep["findings"]],
+    }, separators=(",", ":"))
+
+
+def ai_report(days):
+    """Ask Claude to write the report; kept until the next one. Returns the stored result."""
+    try:
+        import anthropic
+    except ImportError:
+        return {"at": time.time(), "error": "Claude reports need the anthropic package; ./install.sh --api-key sets it up."}
+    rep = trend_report(days)
+    if not rep["covered"]:
+        return {"at": time.time(), "error": "No readings yet for this stretch."}
+    # base_url fixed, so an ANTHROPIC_BASE_URL left in the environment (say, for a proxy) can't send the key elsewhere
+    client = anthropic.Anthropic(api_key=AI_KEY, base_url="https://api.anthropic.com", timeout=300)
+    extra = {}
+    if AI_MODEL in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5"):
+        # if a safety check declines the request, the API retries it on a suitable model instead of failing
+        extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+    try:
+        msg = client.beta.messages.create(
+            model=AI_MODEL, max_tokens=8000, output_config={"effort": "high"}, system=AI_SYSTEM,
+            messages=[{"role": "user", "content": ai_input(rep)}], **extra)
+    except anthropic.AuthenticationError:
+        return {"at": time.time(), "error": "Anthropic didn't accept the API key. Set it again with ./install.sh --api-key."}
+    except anthropic.RateLimitError:
+        return {"at": time.time(), "error": "Anthropic is rate limiting this key; try again in a minute."}
+    except anthropic.APIStatusError as e:
+        print(f"Claude report failed: {e.status_code} {e.message}", flush=True)
+        return {"at": time.time(), "error": f"Anthropic answered {e.status_code}; Heimdall's log has the details."}
+    except anthropic.APIConnectionError:
+        return {"at": time.time(), "error": "Couldn't reach Anthropic."}
+    if msg.stop_reason == "refusal":
+        return {"at": time.time(), "error": "Claude declined to write this report."}
+    text = "".join(b.text for b in msg.content if b.type == "text").strip()
+    return {"at": time.time(), "text": text, "model": msg.model} if text else {"at": time.time(), "error": "Claude sent back an empty report."}
+
+
+def summary_loop():
+    """Save trends every few minutes. At the set hour: Claude's reports, if a key is set (the last 24 hours every
+    day, the week on Mondays; nobody can ask for more, since each one costs money), then the summaries to your phone."""
+    if AI_KEY:  # first start with a key: one report per stretch now, rather than waiting for tomorrow morning
+        for days in (1, 7):
+            e = ai_entry(days)
+            if not e.get("text") and time.time() - e.get("error_at", 0) > 86400:
+                ai_write(days)
+    n = 0
+    while True:
+        time.sleep(60)
+        n += 1
+        if n % 5 == 0:
+            save_trends()
+        lt = time.localtime()
+        if lt.tm_hour != int(conf("alerts", "summary_hour")):
+            continue
+        today = time.strftime("%Y-%m-%d", lt)
+        for kind, days, due in (("daily_summary", 1, True), ("weekly_summary", 7, lt.tm_wday == 0)):
+            if not due or trends["sent"].get(kind) == today:
+                continue
+            with trend_lock:
+                trends["sent"][kind] = today
+            rep = trend_report(days)
+            if not rep["covered"]:
+                continue
+            ai = ai_write(days) if AI_KEY else {}
+            if kind not in ALERT_ON or not ALERTS.get("url"):
+                continue
+            text = summary_text(rep)
+            if ai.get("text"):  # Claude's own summary paragraph, if it wrote one; Heimdall's findings if not
+                link = text.rsplit("\n", 1)[-1]
+                text = ai["text"].split("\n\n", 1)[0].strip() + "\n" + link
+            alert(("Daily summary: " if days == 1 else "Weekly summary: ") + text)
 
 
 def off_limits(a):
@@ -402,6 +1017,8 @@ def link_loop():
     while True:
         try:
             state["link"] = read_link()
+            if state["link"]:
+                trends["wifi"] = state["link"]["type"] == "wifi"
             if state["link"] and state["link"].get("signal_dbm"):
                 record("signal", state["link"]["signal_dbm"])
         except Exception:
@@ -493,7 +1110,7 @@ def scan_loop():
                         # one missed check can be a sleepy phone; call it gone after two
                         if now - d["last"] > CHECK_EVERY * 1.5:
                             d["online"] = False
-                            events.append({"t": now, "ip": ip, "name": d["name"], "what": "left"})
+                            add_event({"t": now, "ip": ip, "name": d["name"], "what": "left"})
                     continue
                 if not d:
                     name = NAMES.get(ip, reverse.get(ip, ""))
@@ -504,7 +1121,7 @@ def scan_loop():
                 if not d["online"]:
                     d["online"] = True
                     if state["last_scan"]:  # don't flood the feed on the very first scan
-                        events.append({"t": now, "ip": ip, "name": d["name"], "what": "joined"})
+                        add_event({"t": now, "ip": ip, "name": d["name"], "what": "joined"})
                 d["last"] = now
                 d["mac"] = macs.get(ip, d.get("mac"))
                 if not d.get("vendor") and (vendor := vendor_of(d["mac"])):
@@ -523,6 +1140,7 @@ def scan_loop():
             if sweep:
                 state["last_sweep"] = now
             saved = json.dumps({"devices": devices, "events": events})
+            online = sum(1 for d in devices.values() if d["online"])
         with open(SAVED + ".tmp", "w") as f:
             f.write(saved)
         os.replace(SAVED + ".tmp", SAVED)
@@ -532,6 +1150,7 @@ def scan_loop():
             _, avg, mx, lost = d["rtt"][-1]
             out.append([stamp, d["ip"], d["name"], d["kind"], "" if avg is None else avg, "" if mx is None else mx, lost])
         append_log(DEVICE_LOG, out)
+        tally_scan(now, [(r[1], r[2], r[3], r[4] if r[4] != "" else None, r[6]) for r in out], online)
         time.sleep(max(0, CHECK_EVERY - (time.time() - now)))
 
 
@@ -634,7 +1253,7 @@ def mesh_loop():
             with lock:
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
                     name = NAMES.get(ip) or ("Router" if ip == ROUTER else f"Wifi point .{ip.rsplit('.', 1)[1]}")
-                    events.append({"t": now, "ip": ip, "name": name, "what": "restarted"})
+                    add_event({"t": now, "ip": ip, "name": name, "what": "restarted"})
                     if "restarts" in ALERT_ON:
                         alert(f"{'Router' if ip == ROUTER else point_label(ip)} restarted")
                 mesh[ip] = {"ip": ip, "at": now, "uptime": up, "role": sysinfo.get("groupRole"), "model": sysinfo.get("modelId"),
@@ -750,6 +1369,7 @@ def save_settings(new):
 def restart():
     """Start Heimdall afresh in this same process, so new settings apply everywhere at once."""
     print("Settings changed: restarting", flush=True)
+    save_trends()
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
@@ -803,6 +1423,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "thresholds": THRESHOLDS, "pings_per_check": PINGS_PER_CHECK, "points": point_list(), "mesh": list(mesh.values()),
                                   "devices": devs, "events": evs, "host": socket.gethostname(), **state},
                                  separators=(",", ":")).encode(), "application/json")
+        elif url.path == "/trends":
+            days = 7 if parse_qs(url.query).get("days") == ["7"] else 1
+            rep = trend_report(days)
+            with trend_lock:
+                e = dict(ai_entry(days))
+            rep["ai"] = {"on": bool(AI_KEY), "model": AI_MODEL, "running": days in ai_running, "next_at": ai_next(days), **e}
+            self.send(json.dumps(rep, separators=(",", ":")).encode(), "application/json")
         elif url.path == "/settings":
             self.send(json.dumps({
                 "values": {s: {k: conf(s, k) for s2, k in EDITABLE if s2 == s} for s, _ in EDITABLE},
@@ -863,6 +1490,18 @@ if __name__ == "__main__":
             raise SystemExit(err)
         print("Sent. Check your phone.")
         raise SystemExit
+    if "--report" in sys.argv:  # the day's or week's findings, in the terminal
+        days = 7 if sys.argv[sys.argv.index("--report") + 1:][:1] == ["week"] else 1
+        if not load_trends(build=False):
+            raise SystemExit("No trends yet: start Heimdall first (it builds them from its logs).")
+        if "--ai" in sys.argv:
+            r = ai_report(days)
+            raise SystemExit(r.get("error") or r["text"])
+        rep = trend_report(days)
+        print(rep["headline"])
+        for f in rep["findings"]:
+            print(f"- {f['text']}")
+        raise SystemExit
     try:
         with open(SAVED) as f:
             saved = json.load(f)
@@ -878,13 +1517,18 @@ if __name__ == "__main__":
                 d["kind"] = kind_of(d["ip"], d["name"], d.get("vendor"))
     except (OSError, ValueError, KeyError):
         pass
+    load_trends()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # systemd stopping us: save trends on the way out
     for n, h in TARGETS.items():
         forever(pinger, n, h)
-    for job in (dns_loop, link_loop, scan_loop, mesh_loop, alert_loop):
+    for job in (dns_loop, link_loop, scan_loop, mesh_loop, alert_loop, summary_loop):
         forever(job)
     if MDNS_NAME:
         forever(mdns_loop, MDNS_NAME, MDNS_IP)
     where = f"http://{MDNS_NAME}" + ("" if PORT == 80 else f":{PORT}") if MDNS_NAME else f"http://{MY_IP}:{PORT}"
     print(f"Heimdall: {where}  (router {ROUTER}, network {NET}, log {LOG})")
     HOSTS = allowed_hosts()
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    try:
+        ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    finally:
+        save_trends()

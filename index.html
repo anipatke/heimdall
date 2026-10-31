@@ -118,6 +118,20 @@
                    margin: 16px -16px -16px; padding: 12px 16px; background: var(--surface-1); border-top: 1px solid var(--border); }
   #settings .bar .msg { margin-right: auto; font-size: 13px; }
   .err { color: var(--critical); }
+  .tabs { display: inline-flex; gap: 4px; }
+  .findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .findings li { display: grid; grid-template-columns: 62px 1fr; gap: 10px; align-items: baseline; font-size: 13px; color: var(--text-secondary); }
+  .report { font-size: 14px; color: var(--text-secondary); }
+  .report p:first-child { color: var(--text-primary); font-size: 15px; }
+  .report h4 { font-size: 14px; color: var(--text-primary); margin: 14px 0 4px; }
+  .report ul { margin: 4px 0; padding-left: 20px; }
+  .report p { margin: 6px 0; }
+  .moment { padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .moment:first-child { border-top: 0; padding-top: 0; }
+  .moment b { color: var(--text-primary); font-weight: 600; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--text-secondary); margin: 4px 0 8px; align-items: center; }
+  .swatches i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  @media (max-width: 640px) { .tabs { order: 5; width: 100%; } .tabs button { flex: 1; } .findings li { grid-template-columns: 1fr; gap: 2px; } }
   @media (max-width: 640px) { .field { grid-template-columns: 1fr; } #settings input[type=number] { width: 64px; } }
 </style>
 </head>
@@ -126,6 +140,11 @@
   <header>
     <h1>Heimdall</h1>
     <span class="sub">watching your home network</span>
+    <nav class="tabs" aria-label="View">
+      <button data-view="live" aria-pressed="true">Live</button>
+      <button data-view="day" aria-pressed="false">Last 24 h</button>
+      <button data-view="week" aria-pressed="false">Last 7 days</button>
+    </nav>
     <span class="live" id="live">connecting…</span>
     <button id="openSettings" aria-haspopup="dialog">⚙ Settings</button>
   </header>
@@ -141,6 +160,7 @@
     </form>
   </dialog>
 
+  <div id="liveView">
   <section class="card" id="verdict">
     <p class="headline" id="headline">Gathering a minute of readings…</p>
     <div class="areas" id="areas"></div>
@@ -187,6 +207,34 @@
       <h3>Comings &amp; goings</h3>
       <div id="events" class="sub">Nothing yet.</div>
     </section>
+  </div>
+  </div>
+
+  <div id="trendView" hidden>
+    <section class="card">
+      <p class="headline" id="tHeadline">Working it out…</p>
+      <ul class="findings" id="tFindings"></ul>
+    </section>
+    <section class="card">
+      <div class="controls"><h2>Claude's report</h2><span class="muted" id="aiMeta"></span></div>
+      <div id="aiBody" class="report"></div>
+    </section>
+    <section class="card">
+      <div class="controls"><h2 id="tProbTitle">When things went wrong</h2>
+        <button data-tm="home" aria-pressed="true">Home network</button><button data-tm="internet" aria-pressed="false">Internet</button></div>
+      <div id="tProbLegend"></div>
+      <div class="chartwrap"><svg id="tProb" role="img" aria-label="Share of time the network was slow or dropping replies, by hour"></svg><div class="tip"></div></div>
+    </section>
+    <section class="card">
+      <div class="controls"><h2>Slowest replies each hour (ms), lower is better</h2></div>
+      <div class="legend" id="tLineLegend"></div>
+      <div class="chartwrap"><svg id="tLine" role="img" aria-label="Slowest 5% of replies each hour, for the router and the internet"></svg><div class="tip"></div></div>
+      <div style="overflow-x:auto"><table id="tTable" style="margin-top:12px"></table></div>
+    </section>
+    <div class="grid2">
+      <section class="card"><h3>Worst moments</h3><div id="tMoments" class="sub"></div></section>
+      <section class="card"><h3>Devices</h3><div id="tDevs" class="sub"></div></section>
+    </div>
   </div>
 </main>
 <script>
@@ -244,7 +292,7 @@ function deviceHealth(d) {
 }
 
 function render() {
-  if (!data) return;
+  if (!data || view !== "live") return;  // drawing into a hidden view would measure it as 0 wide
   const now = Date.now() / 1000, since = now - range, recent = now - 120;
   const link = data.link, onWifi = link?.type === "wifi";
   // Over wifi every reading includes Heimdall's own hop, so the bar for "fine" is higher.
@@ -497,10 +545,12 @@ const SETTINGS = [
     ["thresholds", "device_missed", "A device is struggling when it misses", "%", "", ["Missing replies", "Not answering"]]]],
   ["Alerts", [
     ["alerts", "internet_after", "The internet counts as down after", "s"],
-    ["alerts", "offline_after", "A wifi point counts as offline after", "s"]]],
+    ["alerts", "offline_after", "A wifi point counts as offline after", "s"],
+    ["alerts", "summary_hour", "Send the daily and weekly summaries at", "hour, 0–23"]]],
   ["Logs", [["logs", "max_mb", "Keep each log up to", "MB", "When full, it becomes .old and a new one starts, so this much again is kept."]]],
 ];
-const ALERT_NAMES = { internet: "Internet down", wifi_points: "Wifi point offline", restarts: "Router or point restarted", new_devices: "New device joined" };
+const ALERT_NAMES = { internet: "Internet down", wifi_points: "Wifi point offline", restarts: "Router or point restarted", new_devices: "New device joined",
+                      daily_summary: "Daily summary", weekly_summary: "Weekly summary (Mondays)" };
 let saved = null;  // what the server sent, to compare against when saving
 
 function numberBox(sec, key, i, value, def, [lo, hi], label) {
@@ -563,6 +613,257 @@ $("settingsForm").onsubmit = async e => {
   setTimeout(() => { $("settings").close(); poll(); }, 3000);
 };
 
+// ---- Day and week views: hourly roll-ups from /trends, with Heimdall's findings and (optionally) Claude's report.
+let view = "live", trend = null, tMetric = "home", trendTimer = null;
+const hhmm = t => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const when = (t, days) => days === 1 ? hhmm(t) : `${new Date(t * 1000).toLocaleDateString([], { weekday: "short" })} ${hhmm(t)}`;
+const durTxt = s => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min`;
+const pc = v => v == null ? "–" : v < 0.05 ? "0%" : v < 10 ? `${v.toFixed(1)}%` : `${Math.round(v)}%`;
+const tName = ip => esc(trend.names?.[ip] || `Wifi point .${ip.split(".").pop()}`);
+
+function showView(v) {
+  view = ["day", "week"].includes(v) ? v : "live";
+  document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view));
+  $("liveView").hidden = view !== "live";
+  $("trendView").hidden = view === "live";
+  if (location.hash.slice(1) !== (view === "live" ? "" : view)) history.replaceState(null, "", view === "live" ? location.pathname : `#${view}`);
+  clearTimeout(trendTimer);
+  if (view === "live") return render();
+  trend = null;
+  $("tHeadline").textContent = "Working it out…";
+  loadTrend();
+}
+document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => showView(b.dataset.view));
+addEventListener("hashchange", () => showView(location.hash.slice(1)));
+document.querySelectorAll("[data-tm]").forEach(b => b.onclick = () => {
+  tMetric = b.dataset.tm;
+  document.querySelectorAll("[data-tm]").forEach(o => o.setAttribute("aria-pressed", o === b));
+  renderTrend();
+});
+
+async function loadTrend() {
+  clearTimeout(trendTimer);
+  if (view === "live") return;
+  const days = view === "week" ? 7 : 1;
+  try {
+    const r = await (await fetch(`/trends?days=${days}`)).json();
+    if (view !== (days === 7 ? "week" : "day")) return;  // switched while it loaded
+    trend = r;
+    renderTrend();
+  } catch { $("tHeadline").textContent = "Couldn't reach Heimdall."; }
+  // a report being written is checked often; otherwise the hour's figures barely move
+  trendTimer = setTimeout(loadTrend, trend?.ai?.running ? 4000 : 60000);
+}
+
+// Claude writes headings, bullets and bold only; everything is escaped first, so nothing it says can become markup.
+function markdown(md) {
+  const out = []; let list = false;
+  for (const line of esc(md).split("\n")) {
+    const li = line.match(/^\s*[-*] (.*)/), h = line.match(/^#{1,4} (.*)/);
+    if (!li && list) { out.push("</ul>"); list = false; }
+    if (h) out.push(`<h4>${h[1]}</h4>`);
+    else if (li) { if (!list) { out.push("<ul>"); list = true; } out.push(`<li>${li[1]}</li>`); }
+    else if (line.trim()) out.push(`<p>${line}</p>`);
+  }
+  if (list) out.push("</ul>");
+  return out.join("").replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+
+// Claude writes these on a schedule (each costs money), so there's nothing to press: just when it was, and when next.
+function renderAi() {
+  const ai = trend.ai, day = trend.days === 1;
+  const next = ai.next_at ? when(ai.next_at, 7) : "";
+  const failed = ai.error && (!ai.text || ai.error_at > ai.at);
+  $("aiMeta").textContent = !ai.on ? "" : ai.running ? "writing…" : ai.text ? `written ${ago(ai.at)}${next ? ` · next ${next}` : ""}` : next ? `next ${next}` : "";
+  $("aiBody").innerHTML = !ai.on
+    ? `<p class="muted" style="font-size:13px">Off. Claude can read these figures and write you a plain-English report once a day (and the week's on Mondays), also sent with the summaries to your phone. It sends this summary to Anthropic (hourly figures, problem times, device names; no hardware addresses) and costs a few cents a report. To turn it on, run <code>./install.sh --api-key</code> on the Heimdall machine.</p>`
+    : (ai.running && !ai.text ? `<p class="muted">Claude is reading the figures… this takes up to a minute.</p>` : "")
+      + (failed ? `<p class="err">The last try failed: ${esc(ai.error)}</p>` : "")
+      + (ai.text ? markdown(ai.text)
+         : ai.running || failed ? ""
+         : `<p class="muted">No report yet. Claude writes one ${day ? "each morning" : "each Monday morning"}${next ? ` (next ${next})` : ""}.</p>`);
+}
+
+function renderTrend() {
+  if (!trend || view === "live") return;
+  const r = trend, days = r.days;
+  $("tHeadline").textContent = r.headline;
+  $("tFindings").innerHTML = r.findings.map(f => `<li>${badge(f.l).replace("Offline", "Note")}<span>${esc(f.text)}</span></li>`).join("");
+  renderAi();
+  document.querySelectorAll("[data-tm]").forEach(b => b.hidden = days === 1);
+  $("tProbTitle").textContent = days === 1 ? "When things went wrong: share of each hour slow or dropping" : "When things went wrong, hour by hour";
+  (days === 1 ? dayBars : weekGrid)(r);
+  trendLines(r);
+  trendTable(r);
+  trendMoments(r);
+  trendDevices(r);
+}
+
+// Hover any mark with data-tip (bars, cells, hour columns) for its details.
+document.querySelectorAll("#trendView .chartwrap").forEach(w => {
+  w.addEventListener("mousemove", e => {
+    const t = e.target.closest("[data-tip]"), tip = w.querySelector(".tip");
+    if (!t) return (tip.style.display = "none");
+    tip.innerHTML = t.dataset.tip;
+    tip.style.display = "block";
+    const rect = w.getBoundingClientRect(), px = e.clientX - rect.left;
+    tip.style.left = Math.max(0, Math.min(px + 12, rect.width - tip.offsetWidth - 4)) + "px";
+    tip.style.top = "8px";
+  });
+  w.addEventListener("mouseleave", () => w.querySelector(".tip").style.display = "none");
+});
+
+const homeBad = h => h.k.router?.bad ?? null;
+// internet trouble the home network didn't cause, roughly: what's left after the router's share
+const netBad = (h, inet) => h.k[inet] && h.k.router ? Math.max(0, h.k[inet].bad - h.k.router.bad) : null;
+const tipHead = (t, days) => `<div style="color:var(--text-secondary)">${days === 1 ? `${hhmm(t)}–${hhmm(t + 3600)}` : `${new Date(t * 1000).toLocaleDateString([], { weekday: "long" })} ${hhmm(t)}`}</div>`;
+
+function dayBars(r) {
+  const svg = $("tProb"), W = svg.clientWidth, H = svg.clientHeight || 260, m = { l: 40, r: 12, t: 10, b: 26 };
+  const hs = r.hours, n = hs.length, bw = (W - m.l - m.r) / n;
+  const tot = hs.map(h => (homeBad(h) ?? 0) + (netBad(h, r.inet) ?? 0));
+  const ymax = Math.max(2, Math.ceil(Math.max(...tot) * 1.15));
+  const y = v => m.t + (1 - Math.min(v, ymax) / ymax) * (H - m.t - m.b), base = y(0);
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax / 4 * i;
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${v < 10 ? v.toFixed(1) : Math.round(v)}%</text>`;
+  }
+  hs.forEach((h, i) => {
+    const x = m.l + i * bw, hb = homeBad(h), nb = netBad(h, r.inet);
+    if (new Date(h.t * 1000).getHours() % 3 === 0) g += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${hhmm(h.t)}</text>`;
+    let tip = tipHead(h.t, 1);
+    if (hb == null) {
+      g += `<rect x="${x + 1}" y="${m.t}" width="${bw - 2}" height="${base - m.t}" fill="var(--grid)" opacity=".5"/>`;
+      tip += "<div>Heimdall wasn't running</div>";
+    } else {
+      const w = Math.max(2, bw - 4), hh = Math.max(0, base - y(hb)), nh = Math.max(0, base - y(hb + (nb ?? 0))) - hh;
+      if (hh > 0) g += `<rect x="${x + 2}" y="${base - hh}" width="${w}" height="${hh}" rx="2" fill="var(--series-1)"/>`;
+      if (nh > 0.5) g += `<rect x="${x + 2}" y="${base - hh - nh}" width="${w}" height="${Math.max(0, nh - 2)}" rx="2" fill="var(--series-2)"/>`;
+      tip += `<div><span class="sw" style="background:var(--series-1)"></span>Home network: <b>${pc(hb)}</b> slow or lost</div>
+              <div><span class="sw" style="background:var(--series-2)"></span>Internet beyond it: <b>${pc(nb)}</b></div>
+              <div class="muted">Router typically ${fmt(h.k.router.med)} ms${h.on ? ` · ${h.on} devices on` : ""}</div>`;
+    }
+    g += `<rect x="${x}" y="${m.t}" width="${bw}" height="${base - m.t}" fill="transparent" data-tip='${tip.replace(/'/g, "&#39;")}'/>`;
+  });
+  g += `<line x1="${m.l}" x2="${W - m.r}" y1="${base}" y2="${base}" stroke="var(--border)"/>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+  $("tProbLegend").className = "legend";
+  $("tProbLegend").innerHTML = `<span style="--c:var(--series-1)">Home network (router slow or silent)</span><span style="--c:var(--series-2)">Internet only (your provider)</span><span style="--c:var(--grid)">Not watched</span>`;
+}
+
+const HEAT = [[0, 6], [0.5, 22], [2, 42], [5, 64], [15, 85], [Infinity, 100]];  // % slow or lost -> strength of the colour
+const heatMix = v => `color-mix(in oklab, var(--series-1) ${HEAT.find(([lim]) => v <= lim)[1]}%, var(--surface-1))`;
+function weekGrid(r) {
+  const svg = $("tProb"), W = svg.clientWidth, m = { l: 44, r: 8, t: 4, b: 22 };
+  const rows = [];
+  for (const h of r.hours) {
+    const d = new Date(h.t * 1000), key = d.toDateString();
+    if (!rows.length || rows[rows.length - 1].key !== key) rows.push({ key, label: d.toLocaleDateString([], { weekday: "short" }), cells: [] });
+    rows[rows.length - 1].cells.push({ h, hr: d.getHours() });
+  }
+  const cw = (W - m.l - m.r) / 24, ch = Math.min(28, Math.max(18, cw)), H = m.t + rows.length * ch + m.b;
+  svg.style.height = H + "px";
+  let g = "";
+  rows.forEach((row, ri) => {
+    const yy = m.t + ri * ch;
+    g += `<text x="${m.l - 8}" y="${yy + ch / 2 + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${row.label}</text>`;
+    for (const { h, hr } of row.cells) {
+      const v = tMetric === "home" ? homeBad(h) : netBad(h, r.inet), x = m.l + hr * cw;
+      let tip = tipHead(h.t, 7);
+      if (v == null) {
+        g += `<rect x="${x + 1}" y="${yy + 1}" width="${cw - 2}" height="${ch - 2}" rx="2" fill="none" stroke="var(--border)" stroke-dasharray="2 2"/>`;
+        tip += "<div>Heimdall wasn't running</div>";
+      } else {
+        g += `<rect x="${x + 1}" y="${yy + 1}" width="${cw - 2}" height="${ch - 2}" rx="2" fill="${heatMix(v)}"/>`;
+        tip += `<div>Home network: <b>${pc(homeBad(h))}</b> slow or lost</div><div>Internet beyond it: <b>${pc(netBad(h, r.inet))}</b></div>
+                <div class="muted">Router typically ${fmt(h.k.router.med)} ms${h.on ? ` · ${h.on} devices on` : ""}</div>`;
+      }
+      g += `<rect x="${x}" y="${yy}" width="${cw}" height="${ch}" fill="transparent" data-tip='${tip.replace(/'/g, "&#39;")}'/>`;
+    }
+  });
+  for (let hr = 0; hr < 24; hr += 3)
+    g += `<text x="${m.l + hr * cw + cw / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${String(hr).padStart(2, "0")}</text>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+  const labels = ["none", "under 0.5%", "0.5–2%", "2–5%", "5–15%", "15% or more"];
+  $("tProbLegend").className = "swatches";
+  $("tProbLegend").innerHTML = `<span>${tMetric === "home" ? "Home network" : "Internet only"}, share of the hour slow or lost:</span>` +
+    HEAT.map((_, i) => `<span><i style="background:${heatMix(HEAT[i][0] === Infinity ? 1e9 : HEAT[i][0])}"></i>${labels[i]}</span>`).join("") +
+    `<span><i style="border:1px dashed var(--border)"></i>not watched</span>`;
+}
+
+function trendLines(r) {
+  const svg = $("tLine"), W = svg.clientWidth, H = svg.clientHeight || 260, m = { l: 40, r: 70, t: 10, b: 26 };
+  const ls = [{ key: "router", name: "Router", css: "--series-1" }, { key: r.inet, name: "Internet", css: "--series-2" }];
+  const hs = r.hours, n = hs.length, x = i => m.l + (i + 0.5) / n * (W - m.l - m.r);
+  const vals = hs.flatMap(h => ls.map(s => h.k[s.key]?.p95)).filter(v => v != null);
+  const ymax = Math.max(20, Math.ceil((pct(vals, .95) ?? 0) * 1.2 / 10) * 10);
+  const y = v => m.t + (1 - Math.min(v, ymax) / ymax) * (H - m.t - m.b);
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = ymax / 4 * i;
+    g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${Math.round(v)}</text>`;
+  }
+  hs.forEach((h, i) => {
+    const d = new Date(h.t * 1000);
+    if (r.days === 1 ? d.getHours() % 3 === 0 : d.getHours() === 0)
+      g += `<text x="${x(i)}" y="${H - 6}" text-anchor="${r.days === 1 ? "middle" : "start"}" font-size="11" fill="var(--text-muted)">${r.days === 1 ? hhmm(h.t) : d.toLocaleDateString([], { weekday: "short" })}</text>`;
+  });
+  const ends = [];
+  ls.forEach(s => {
+    let d = "", pen = false, last = null;
+    hs.forEach((h, i) => {
+      const v = h.k[s.key]?.p95;
+      if (v == null) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`; pen = true; last = v;
+    });
+    g += `<path d="${d}" fill="none" stroke="var(${s.css})" stroke-width="2" stroke-linejoin="round"/>`;
+    if (last != null) ends.push({ s, y: y(last) });
+  });
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+  ends.forEach(e => g += `<text x="${W - m.r + 6}" y="${e.y + 4}" font-size="11" fill="var(--text-secondary)">${e.s.name}</text>`);
+  hs.forEach((h, i) => {
+    if (!h.k.router) return;
+    const tip = tipHead(h.t, r.days) + ls.map(s => { const st = h.k[s.key];
+      return `<div><span class="sw" style="background:var(${s.css})"></span>${s.name}: <b>${fmt(st?.p95)} ms</b> slowest, ${fmt(st?.med)} ms typical, ${pc(st?.loss)} lost</div>`; }).join("");
+    g += `<rect x="${x(i) - (W - m.l - m.r) / n / 2}" y="${m.t}" width="${(W - m.l - m.r) / n}" height="${H - m.t - m.b}" fill="transparent" data-tip='${tip.replace(/'/g, "&#39;")}'/>`;
+  });
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+  $("tLineLegend").innerHTML = ls.map(s => `<span style="--c:var(${s.css})">${s.name}</span>`).join("");
+}
+
+function trendTable(r) {
+  const before = r.days === 1 ? "day before" : "week before";
+  const rows = [["Router", "router"], ...r.points.map(ip => [tName(ip), `point:${ip}`]), ["Internet", r.inet], ["Website lookups", "dns"]];
+  const vs = k => {
+    const a = r.prev[k]?.bad, b = r.cur[k]?.bad;
+    if (a == null || b == null || r.prev_covered < 6) return "–";
+    if (Math.abs(a - b) < 0.3 || ((b + .01) / (a + .01) > 0.8 && (b + .01) / (a + .01) < 1.25)) return "about the same";
+    return b < a ? `better (${pc(a)})` : `worse (${pc(a)})`;
+  };
+  $("tTable").innerHTML = `<tr><th>For the ${r.days === 1 ? "last 24 hours" : "last 7 days"}</th><th>Typical</th><th>Slow (95%)</th><th>Lost</th><th>Slow or lost</th><th>Against the ${before}</th></tr>` +
+    rows.filter(([, k]) => r.cur[k]).map(([name, k]) => { const st = r.cur[k];
+      return `<tr><td>${name}</td><td>${fmt(st.med)} ms</td><td>${fmt(st.p95)} ms</td><td>${pc(st.loss)}</td><td>${pc(st.bad)}</td><td>${vs(k)}</td></tr>`; }).join("");
+}
+
+function trendMoments(r) {
+  const top = [...r.spells].sort((a, b) => b.secs - a.secs).slice(0, 6);
+  $("tMoments").innerHTML = !top.length ? "Nothing worth mentioning: no spells of slow or lost replies." : top.map(e =>
+    `<div class="moment"><b>${when(e.start, r.days)}</b> · ${durTxt(e.secs)} · ${e.type === "home" ? "home network stalled" : "internet dropped (your provider)"}
+     <div class="muted">replies up to ${e.worst >= 1000 ? (e.worst / 1000).toFixed(1) + " s" : fmt(e.worst) + " ms"}${e.lost ? `, ${e.lost} lost` : ""}${e.notes.length ? ` · ${esc(e.notes.join(", "))}` : ""}</div></div>`).join("");
+}
+
+function trendDevices(r) {
+  const T = r.thresholds, peak = r.hours.reduce((b, h) => (h.on ?? 0) > (b?.on ?? 0) ? h : b, null);
+  const flaky = r.devices.filter(d => !NAPPERS.has(d.kind) && d.checks >= 10 && d.missed != null && d.missed >= T.device_missed[0])
+    .sort((a, b) => b.missed - a.missed).slice(0, 6);
+  $("tDevs").innerHTML = `<p style="margin:0 0 8px">${peak ? `Up to <b>${peak.on}</b> devices on at once (around ${when(peak.t, r.days)}). ` : ""}${r.joined} arrivals and ${r.left} departures${r.drops.length ? `, including ${r.drops.length === 1 ? "one moment" : `${r.drops.length} moments`} when several dropped off together` : ""}.</p>` +
+    (flaky.length ? `<div class="muted" style="margin-bottom:4px">Always-on devices missing replies:</div>` + flaky.map(d =>
+      `<div class="moment"><b>${d.name ? esc(d.name) : d.ip}</b> <span class="muted">${esc(d.kind)}</span> · missed ${pc(d.missed)} of pings${d.prev_missed != null ? ` (${pc(d.prev_missed)} the ${r.days === 1 ? "day" : "week"} before)` : ""}</div>`).join("")
+      : `<p class="muted" style="margin:0">Every always-on device answered reliably. Phones, tablets and gadgets nap to save battery, so they're left out.</p>`);
+}
+
 // Only new readings come down each time, so an open page (or a phone) costs almost nothing.
 async function poll() {
   try {
@@ -582,7 +883,8 @@ async function poll() {
 const every = matchMedia("(max-width: 700px)").matches ? 5000 : 2000;
 poll(); setInterval(() => { if (!document.hidden) poll(); }, every);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
-addEventListener("resize", render);
+addEventListener("resize", () => view === "live" ? render() : renderTrend());
+showView(location.hash.slice(1));
 </script>
 </body>
 </html>
