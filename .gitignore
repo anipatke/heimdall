@@ -5,3 +5,5 @@ state.json
 heimdall.toml
 *.old
 state.json.tmp
+*.bak
+*.tmp
