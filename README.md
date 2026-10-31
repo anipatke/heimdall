@@ -198,8 +198,10 @@ so the cost stays predictable: about 37 reports a month.
 This is the one feature that sends data about your network out of your home. Each report
 sends Anthropic that stretch's hourly figures, problem times, device names and addresses on
 your network (not hardware addresses). It needs an
-[Anthropic API key](https://platform.claude.com) and costs a few cents a report
-(Claude Opus 5.5; that comes to a few dollars a month). Use a key from a workspace of its
+[Anthropic API key](https://platform.claude.com) and costs about 10¢ a report on the
+default Claude Opus 5.5 at high effort (a few dollars a month). Sonnet 5.5 costs about
+half that, Haiku 5.5 well under a cent, and lower effort costs less again: pick both in
+**⚙ Settings → Claude reports**. Use a key from a workspace of its
 own with a monthly spend limit, so the cost is capped whatever happens.
 
 ```sh
@@ -225,11 +227,12 @@ hand with reports, set the key without it landing in your shell history, then st
 read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY   # paste the key, then Enter
 python3 server.py      # needs the anthropic package: pip install anthropic==2.3.0 in a venv
 ```
-To use a cheaper model, or turn reports off while keeping the key:
+The model and effort can also be set in `heimdall.toml`, as can turning reports off while keeping the key:
 
 ```toml
 [ai]
 model = "claude-sonnet-5-5"   # default claude-opus-5-5; claude-haiku-5-5 is cheapest
+effort = "medium"             # low, medium, high (default), xhigh or max
 # on = false
 ```
 

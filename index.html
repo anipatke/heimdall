@@ -111,6 +111,8 @@
   .field .inputs label { display: flex; flex-direction: column; font-size: 11px; color: var(--text-muted); }
   #settings input[type=number] { width: 76px; }
   #settings input[type=text], #settings input[type=url] { width: 100%; }
+  #settings select { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-0);
+                     border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; max-width: 100%; }
   #settings input { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-0);
                     border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
   #settings .checks-on { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; padding: 4px 0; }
@@ -549,6 +551,15 @@ const SETTINGS = [
     ["alerts", "summary_hour", "Send the daily and weekly summaries at", "hour, 0–23"]]],
   ["Logs", [["logs", "max_mb", "Keep each log up to", "MB", "When full, it becomes .old and a new one starts, so this much again is kept."]]],
 ];
+// Rough cost of one report, from what Opus at high effort actually cost; effort scales how long Claude thinks.
+const AI_CHOICES = {
+  "ai.model": ["Claude model", "", {
+    "claude-opus-5-5": "Opus 5.5: the most thorough (about 10¢ a report at high effort)",
+    "claude-sonnet-5-5": "Sonnet 5.5: about half the cost of Opus",
+    "claude-haiku-5-5": "Haiku 5.5: the cheapest, well under 1¢ a report"}],
+  "ai.effort": ["How hard Claude thinks", "Higher means more careful reports and more cost per report; medium is usually plenty for this.", {
+    low: "Low: quick, cheapest", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max: slowest, most expensive"}],
+};
 const ALERT_NAMES = { internet: "Internet down", wifi_points: "Wifi point offline", restarts: "Router or point restarted", new_devices: "New device joined",
                       daily_summary: "Daily summary", weekly_summary: "Weekly summary (Mondays)" };
 let saved = null;  // what the server sent, to compare against when saving
@@ -565,13 +576,20 @@ function renderSettings(st) {
     return `<div class="field"><span>${label}${unit ? ` <span class="muted">(${unit})</span>` : ""}</span><div class="inputs">${inputs}</div>${help ? `<div class="help">${help}</div>` : ""}</div>`;
   };
   const units = [st.router, ...st.points];
+  const pick = ([id, c]) => {
+    const [label, help, names] = AI_CHOICES[id], opts = c.options.includes(c.value) ? c.options : [c.value, ...c.options];
+    return `<div class="field"><span>${label}</span><div class="inputs"><select data-choice="${id}" aria-label="${esc(label)}">${opts.map(o =>
+      `<option value="${esc(o)}" ${o === c.value ? "selected" : ""}>${esc(names[o] || o)}${o === c.default ? " (default)" : ""}</option>`).join("")}</select></div>${help ? `<div class="help">${help}</div>` : ""}</div>`;
+  };
+  const aiPart = `<h3>Claude reports</h3>${st.ai_on ? "" : `<p class="help" style="margin:0 0 4px">Off until an API key is added with <code>./install.sh --api-key</code>; these apply once it is.</p>`}`
+    + Object.entries(st.choices).filter(([id]) => id.startsWith("ai.")).map(pick).join("");
   $("settingsBody").innerHTML = SETTINGS.map(([title, fields]) => `<h3>${title}</h3>` + (title === "Alerts" ? `
       <div class="field" style="grid-template-columns:1fr"><span>Send alerts to <span class="muted">(ntfy topic address, or any web address; {text} is filled in with the message)</span></span>
         <div class="inputs"><input type="url" id="alertUrl" value="" placeholder="${st.alerts.saved ? `${esc(st.alerts.saved)} (saved; type a new address to replace it)` : "https://ntfy.sh/your-topic"}">
         <button type="button" id="testAlert">Send test</button></div>
         ${st.alerts.saved ? `<label class="help" style="margin:0"><input type="checkbox" id="alertForget"> Forget the saved address and stop sending alerts</label>` : ""}</div>
       <div class="checks-on">${st.all_alerts.map(a => `<label><input type="checkbox" data-alert="${a}" ${st.alerts.on.includes(a) ? "checked" : ""}> ${ALERT_NAMES[a]}</label>`).join("")}</div>` : "")
-    + fields.map(field).join("")).join("") + `<h3>Names</h3>` + units.map(ip => `<div class="field"><span>${ip === st.router ? "Router" : "Wifi point"} <span class="muted">${ip}</span></span>
+    + fields.map(field).join("")).join("") + aiPart + `<h3>Names</h3>` + units.map(ip => `<div class="field"><span>${ip === st.router ? "Router" : "Wifi point"} <span class="muted">${ip}</span></span>
       <div class="inputs"><input type="text" maxlength="40" data-name="${ip}" value="${esc(st.names[ip] || "")}" placeholder="${ip === st.router ? "Router" : `Wifi point .${ip.split(".").pop()}`}"></div></div>`).join("");
   $("testAlert").onclick = async () => {
     $("settingsMsg").textContent = "Sending…";
@@ -606,6 +624,7 @@ $("settingsForm").onsubmit = async e => {
     if (i < 0) out[sec][key] = v; else (out[sec][key] ||= [...d])[i] = v;
   }
   document.querySelectorAll("[data-name]").forEach(inp => out.names[inp.dataset.name] = inp.value.trim());
+  document.querySelectorAll("[data-choice]").forEach(sel => { const [sec, key] = sel.dataset.choice.split("."); (out[sec] ||= {})[key] = sel.value; });
   $("settingsMsg").textContent = "Saving…";
   const r = await post("/settings", out);
   if (r.error) return $("settingsMsg").innerHTML = `<span class="err">${esc(r.error)}</span>`;
