@@ -22,6 +22,10 @@
 # cloudflare = "1.1.1.1"
 # google = "8.8.8.8"
 
+# Your own names for devices and wifi points, by address. Shown everywhere instead of ".138" or a network name.
+# [names]
+# "192.168.1.138" = "Master bedroom"
+
 # Your own naming rules, checked before the built-in ones. "match" is a regular expression
 # tested against the device's network name, case-insensitive.
 # [[kinds]]

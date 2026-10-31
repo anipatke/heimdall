@@ -78,7 +78,9 @@ if sudo ufw status 2>/dev/null | grep -q "Status: active"; then
 fi
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now heimdall
+# restart, not just start: on a re-run the old settings would otherwise keep running
+sudo systemctl enable heimdall
+sudo systemctl restart heimdall
 sleep 2
 systemctl --no-pager --lines=0 status heimdall | head -3
 echo

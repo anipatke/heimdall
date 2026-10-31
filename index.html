@@ -169,7 +169,7 @@ const level = (v, t) => v == null ? "critical" : v < t.good ? "good" : v < t.war
 const worse = (...ls) => ls.reduce((a, b) => RANK[b] < RANK[a] ? b : a, "good");
 const badge = l => `<span class="status"><i style="background:var(${STATUS[l][0]})"></i>${STATUS[l][1]}</span>`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const pointName = ip => `Wifi point .${ip.split(".").pop()}`;
+const pointName = ip => data?.names?.[ip] || `Wifi point .${ip.split(".").pop()}`;
 const devName = d => d.name ? esc(d.name) : `<span class="muted">${d.ip}</span>`;
 
 function stats(kind, since) {
