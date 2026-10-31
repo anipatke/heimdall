@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Heimdall - home network health watcher. Run: python3 server.py, then open http://localhost:8765"""
+import shutil, sys
+if sys.version_info < (3, 11):
+    raise SystemExit("Heimdall needs Python 3.11 or newer.")
+if not (shutil.which("ip") and shutil.which("ping")):
+    raise SystemExit("Heimdall needs the ip and ping commands (Linux).")
 import ipaddress, json, os, random, re, socket, struct, subprocess, threading, time, tomllib, csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -85,14 +90,28 @@ KEEP = 3600  # seconds of history held in memory
 LOG = os.path.join(HERE, "log.csv")
 DEVICE_LOG = os.path.join(HERE, "devices.csv")
 SAVED = os.path.join(HERE, "state.json")  # device list kept across restarts
+LOG_MAX = 100_000_000  # bytes; a full log moves to .old, so each log takes at most twice this
 
 lock = threading.Lock()
+log_lock = threading.Lock()
 series = {}           # kind -> deque of (t, ms or None)
 state = {"link": None, "speed": None, "speed_running": False, "last_scan": None, "last_sweep": None}
 devices = {}          # ip -> {ip, name, mac, kind, first, last, online, rtt: [(t, avg, max, lost)]}
 events = []           # {t, ip, name, what: joined|left}
 points = set()        # wifi points getting nonstop checks
 mesh = {}             # ip -> what the router / wifi point says about itself (its local status page)
+
+
+def append_log(path, rows):
+    """Add rows to a CSV log. Heimdall runs for months, so a full log replaces the previous .old one."""
+    with log_lock:
+        try:
+            if os.path.getsize(path) > LOG_MAX:
+                os.replace(path, path + ".old")
+        except OSError:
+            pass
+        with open(path, "a", newline="") as f:
+            csv.writer(f).writerows(rows)
 
 
 def record(kind, value):
@@ -102,8 +121,20 @@ def record(kind, value):
         q.append((now, value))
         while q and q[0][0] < now - KEEP:
             q.popleft()
-    with open(LOG, "a", newline="") as f:
-        csv.writer(f).writerow([time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value])
+    append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
+
+
+def forever(job, *args):
+    """Run a background job in its own thread. If it ever crashes, say why and start it again,
+    so one surprise doesn't quietly freeze part of the dashboard."""
+    def run():
+        while True:
+            try:
+                job(*args)
+            except Exception as e:
+                print(f"{job.__name__} crashed ({e!r}); restarting in 10 s", flush=True)
+                time.sleep(10)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def pinger(name, host):
@@ -113,16 +144,19 @@ def pinger(name, host):
         p = subprocess.Popen(["ping", "-n", "-O", "-i", "1", "-W", "2", host],
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         late = {}  # seq -> when ping said "no answer yet"; a slow reply can still turn up
-        for line in p.stdout:
-            if m := seq_re.search(line):
-                late.pop(m.group(1), None)
-                record(name, float(m.group(2)))
-            elif m := miss_re.search(line):
-                late.setdefault(m.group(1), time.time())
-            for seq, t in list(late.items()):
-                if time.time() - t > 3:  # still nothing: it really was lost
-                    del late[seq]
-                    record(name, None)
+        try:
+            for line in p.stdout:
+                if m := seq_re.search(line):
+                    late.pop(m.group(1), None)
+                    record(name, float(m.group(2)))
+                elif m := miss_re.search(line):
+                    late.setdefault(m.group(1), time.time())
+                for seq, t in list(late.items()):
+                    if time.time() - t > 3:  # still nothing: it really was lost
+                        del late[seq]
+                        record(name, None)
+        finally:
+            p.kill()  # don't leave a ping running with nobody reading it
         time.sleep(2)
 
 
@@ -290,11 +324,11 @@ def scan_loop():
             f.write(saved)
         os.replace(SAVED + ".tmp", SAVED)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-        with open(DEVICE_LOG, "a", newline="") as f:
-            w = csv.writer(f)
-            for d in rows:
-                _, avg, mx, lost = d["rtt"][-1]
-                w.writerow([stamp, d["ip"], d["name"], d["kind"], "" if avg is None else avg, "" if mx is None else mx, lost])
+        out = []
+        for d in rows:
+            _, avg, mx, lost = d["rtt"][-1]
+            out.append([stamp, d["ip"], d["name"], d["kind"], "" if avg is None else avg, "" if mx is None else mx, lost])
+        append_log(DEVICE_LOG, out)
         time.sleep(max(0, CHECK_EVERY - (time.time() - now)))
 
 
@@ -325,7 +359,7 @@ def mdns_loop(name, ip):
 def add_point(ip):
     if ip not in points:
         points.add(ip)
-        threading.Thread(target=pinger, args=(f"point:{ip}", ip), daemon=True).start()
+        forever(pinger, f"point:{ip}", ip)
 
 
 def mdns_name(ip):
@@ -450,13 +484,11 @@ if __name__ == "__main__":
     except (OSError, ValueError, KeyError):
         pass
     for n, h in TARGETS.items():
-        threading.Thread(target=pinger, args=(n, h), daemon=True).start()
-    threading.Thread(target=dns_loop, daemon=True).start()
-    threading.Thread(target=link_loop, daemon=True).start()
-    threading.Thread(target=scan_loop, daemon=True).start()
-    threading.Thread(target=mesh_loop, daemon=True).start()
+        forever(pinger, n, h)
+    for job in (dns_loop, link_loop, scan_loop, mesh_loop):
+        forever(job)
     if MDNS_NAME:
-        threading.Thread(target=mdns_loop, args=(MDNS_NAME, MDNS_IP), daemon=True).start()
+        forever(mdns_loop, MDNS_NAME, MDNS_IP)
     where = f"http://{MDNS_NAME}" + ("" if PORT == 80 else f":{PORT}") if MDNS_NAME else f"http://{MY_IP}:{PORT}"
     print(f"Heimdall: {where}  (router {ROUTER}, network {NET}, log {LOG})")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
