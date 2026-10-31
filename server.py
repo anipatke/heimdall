@@ -1,28 +1,63 @@
 #!/usr/bin/env python3
 """Heimdall - home network health watcher. Run: python3 server.py, then open http://localhost:8765"""
-import json, os, random, re, socket, struct, subprocess, threading, time, csv
+import ipaddress, json, os, random, re, socket, struct, subprocess, threading, time, tomllib, csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from urllib.request import urlopen
 
-PORT = int(os.environ.get("PORT", 8765))
-HOST = os.environ.get("HOST", "0.0.0.0")
-MDNS_NAME = os.environ.get("MDNS_NAME")  # e.g. heimdall.local - announced to the home network by name
-ROUTER = os.environ.get("ROUTER", "192.168.86.1")
-SUBNET = ROUTER.rsplit(".", 1)[0]  # assumes a /24 home network
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_config():
+    """Settings come from heimdall.toml (all optional), then environment variables. Anything unset is detected."""
+    path = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
+    try:
+        with open(path, "rb") as f:
+            cfg = tomllib.load(f)
+    except FileNotFoundError:
+        cfg = {}
+    flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {})}
+    for key in ("port", "host", "router", "mdns_name", "mdns_ip"):
+        if os.environ.get(key.upper()):
+            flat[key] = os.environ[key.upper()]
+    return flat, cfg.get("kinds", [])
+
+
+def default_route():
+    """(router address, network interface) from this machine's default route."""
+    out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True).stdout
+    m = re.search(r"via (\S+) dev (\S+)", out)
+    if not m:
+        raise SystemExit("Couldn't find your router: this machine has no default route. Set router in heimdall.toml.")
+    return m.group(1), m.group(2)
+
+
+CFG, EXTRA_KINDS = load_config()
+_router, _dev = default_route()
+PORT = int(CFG.get("port", 8765))
+HOST = CFG.get("host", "0.0.0.0")
+ROUTER = CFG.get("router", _router)
+MDNS_NAME = CFG.get("mdns_name", "heimdall.local") or None  # announced to the home network; "" turns it off
 # Kept gentle on purpose: a busy scan clogs Heimdall's own link and makes every reading look worse.
-CHECK_EVERY = 60     # re-check devices we already know about (3 pings each, a few at a time)
-SWEEP_EVERY = 600    # look for new devices across the whole address range (1 ping each)
+CHECK_EVERY = int(CFG.get("device_every", 60))   # re-check devices we already know about (3 pings each, a few at a time)
+SWEEP_EVERY = int(CFG.get("sweep_every", 600))   # look for new devices across the whole address range (1 ping each)
 _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 _s.connect((ROUTER, 9))  # no packet sent; just picks the address we'd reach the router from
 MY_IP = _s.getsockname()[0]
 _s.close()
+MDNS_IP = CFG.get("mdns_ip", MY_IP)
+# The home network, from the address and prefix on the router-facing interface. Sweeps stay within
+# 1024 addresses: a bigger network gets the /22 around this machine.
+_m = re.search(rf"inet ({re.escape(MY_IP)}/\d+)", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout)
+NET = ipaddress.ip_interface(CFG.get("network") or (_m.group(1) if _m else f"{MY_IP}/24")).network
+if NET.num_addresses > 1024:
+    NET = ipaddress.ip_interface(f"{MY_IP}/22").network
 # every address this machine answers to (it may have a second one just for heimdall.local)
 MY_IPS = set(re.findall(r"inet (\S+)/", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout)) | {MY_IP}
-# (pattern in the device's network name, friendly type) - first match wins
-KINDS = [(r"nest-wifi-point|google-wifi", "Wifi point"), (r"google-home|nest-(mini|audio|hub)", "Smart speaker"),
+# (pattern in the device's network name, friendly type) - first match wins; heimdall.toml's [[kinds]] go first
+KINDS = [(k["match"], k["kind"]) for k in EXTRA_KINDS] + [(r"nest-wifi-point|google-wifi", "Wifi point"), (r"google-home|nest-(mini|audio|hub)", "Smart speaker"),
          (r"sonos", "Sonos speaker"), (r"^esp_|tasmota|shelly", "Smart-home gadget"),
          (r"pixel|iphone|android|galaxy|oneplus|note\d|-s\d\d|-a\d\d", "Phone"), (r"ipad|tab", "Tablet"),
          (r"tizen|webos|roku|chromecast|tv", "TV"), (r"^brw|printer|epson|canon|^hp", "Printer"),
@@ -43,10 +78,10 @@ def vendor_of(mac):
         return None  # randomised "private" address, as phones use: no maker to find
     return VENDORS.get(mac[:8].lower())
 
-TARGETS = {"router": ROUTER, "cloudflare": "1.1.1.1", "google": "8.8.8.8"}
-DNS_NAMES = ["google.com", "netflix.com", "amazon.com", "bbc.co.uk", "github.com", "reddit.com", "spotify.com"]
+# what "the internet" means: a couple of big, always-up servers
+TARGETS = {"router": ROUTER, **CFG.get("internet", {"cloudflare": "1.1.1.1", "google": "8.8.8.8"})}
+DNS_NAMES = CFG.get("dns_names", ["google.com", "netflix.com", "amazon.com", "bbc.co.uk", "github.com", "reddit.com", "spotify.com"])
 KEEP = 3600  # seconds of history held in memory
-HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(HERE, "log.csv")
 DEVICE_LOG = os.path.join(HERE, "devices.csv")
 SAVED = os.path.join(HERE, "state.json")  # device list kept across restarts
@@ -192,7 +227,7 @@ def neighbours(confirmed=False):
     confirmed=True keeps only ones that just answered the network's "who has this address?" call."""
     out = subprocess.run(["ip", "neigh"], capture_output=True, text=True).stdout
     return {ip: mac for ip, mac, st in re.findall(r"^(\S+) .*lladdr (\S+).* (\S+)\s*$", out, re.M)
-            if ip.startswith(SUBNET + ".") and ip not in MY_IPS and (not confirmed or st == "REACHABLE")}
+            if ipaddress.ip_address(ip) in NET and ip not in MY_IPS and (not confirmed or st == "REACHABLE")}
 
 
 def scan_loop():
@@ -202,7 +237,7 @@ def scan_loop():
         sweep = not state["last_sweep"] or now - state["last_sweep"] >= SWEEP_EVERY
         known = {ip for ip, d in devices.items() if d["online"] or now - d["last"] < 3600} | set(macs)
         known -= MY_IPS
-        rest = [f"{SUBNET}.{i}" for i in range(1, 255) if f"{SUBNET}.{i}" not in known | MY_IPS] if sweep else []
+        rest = [str(a) for a in NET.hosts() if str(a) not in known | MY_IPS] if sweep else []
         with ThreadPoolExecutor(8) as pool:
             results = dict(zip(known, pool.map(lambda ip: probe(ip, 3), known)))
         with ThreadPoolExecutor(16) as pool:
@@ -265,11 +300,15 @@ def scan_loop():
 
 def mdns_loop(name, ip):
     """Announce name.local -> ip through avahi, for as long as Heimdall runs. No root needed."""
-    import dbus
+    try:
+        import dbus
+    except ImportError:
+        print(f"Not announcing {name}: needs python3-dbus (sudo apt install python3-dbus)")
+        return
     group = None
     while True:
         try:
-            if group is None or group.GetState() not in (1, 2):  # registering / established
+            if not group or group.GetState() not in (1, 2):  # registering / established
                 bus = dbus.SystemBus()
                 server = dbus.Interface(bus.get_object("org.freedesktop.Avahi", "/"), "org.freedesktop.Avahi.Server")
                 group = dbus.Interface(bus.get_object("org.freedesktop.Avahi", server.EntryGroupNew()), "org.freedesktop.Avahi.EntryGroup")
@@ -277,8 +316,9 @@ def mdns_loop(name, ip):
                 group.AddAddress(-1, 0, dbus.UInt32(16), name, ip)
                 group.Commit()
         except Exception as e:  # avahi restarting or missing: try again shortly
-            print(f"Couldn't announce {name}: {e}")
-            group = None
+            if group is not False:
+                print(f"Couldn't announce {name} (is avahi running?): {e}")
+            group = False
         time.sleep(30)
 
 
@@ -405,6 +445,8 @@ if __name__ == "__main__":
             d.pop("tries", None)  # give identification another go after a restart
             if d["kind"] == "Wifi point":
                 add_point(d["ip"])
+            else:  # re-apply naming rules, so edits to heimdall.toml take effect
+                d["kind"] = kind_of(d["ip"], d["name"], d.get("vendor"))
     except (OSError, ValueError, KeyError):
         pass
     for n, h in TARGETS.items():
@@ -414,6 +456,7 @@ if __name__ == "__main__":
     threading.Thread(target=scan_loop, daemon=True).start()
     threading.Thread(target=mesh_loop, daemon=True).start()
     if MDNS_NAME:
-        threading.Thread(target=mdns_loop, args=(MDNS_NAME, os.environ.get("MDNS_IP", MY_IP)), daemon=True).start()
-    print(f"Dashboard: http://localhost:{PORT}  (log: {LOG})")
+        threading.Thread(target=mdns_loop, args=(MDNS_NAME, MDNS_IP), daemon=True).start()
+    where = f"http://{MDNS_NAME}" + ("" if PORT == 80 else f":{PORT}") if MDNS_NAME else f"http://{MY_IP}:{PORT}"
+    print(f"Heimdall: {where}  (router {ROUTER}, network {NET}, log {LOG})")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

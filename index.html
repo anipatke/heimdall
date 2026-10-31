@@ -161,7 +161,7 @@
   </div>
   <section class="card" style="margin-top:12px">
     <h3>What Heimdall can and can't see</h3>
-    <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses, because your router keeps that to itself. For per-device data use, open the Google Home app → Wifi → Devices.</p>
+    <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses, because your router keeps that to itself. For per-device data use, check your router's own app.</p>
   </section>
 </main>
 <script>
@@ -187,9 +187,12 @@ function stats(kind, since) {
 }
 const lossLevel = l => l == null ? "good" : l === 0 ? "good" : l < 2 ? "warning" : l < 5 ? "serious" : "critical";
 
+// Internet targets come from the server's settings; the first one is "the internet" line.
+const inet = () => Object.keys(data.targets).filter(k => k !== "router");
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 // Chart lines: router, internet, then each wifi point. Colour follows the thing, not its position in a list.
 function lines() {
-  return [{ key: "router", name: "Router", css: "--series-1" }, { key: "cloudflare", name: "Internet", css: "--series-2" },
+  return [{ key: "router", name: "Router", css: "--series-1" }, { key: inet()[0], name: "Internet", css: "--series-2" },
           ...(data.points || []).slice(0, 3).map((ip, i) => ({ key: `point:${ip}`, name: pointName(ip), css: `--series-${3 + i}` }))];
 }
 
@@ -217,7 +220,7 @@ function render() {
   const link = data.link, onWifi = link?.type === "wifi";
   // Over wifi every reading includes Heimdall's own hop, so the bar for "fine" is higher.
   const rt = onWifi ? { good: 30, warn: 80, bad: 200 } : { good: 10, warn: 30, bad: 100 };
-  const r = stats("router", recent), cf = stats("cloudflare", recent), gg = stats("google", recent), dns = stats("dns", now - 300);
+  const r = stats("router", recent), [cf, gg = cf] = inet().map(k => stats(k, recent)), first = cap(inet()[0]), dns = stats("dns", now - 300);
   const devs = (data.devices || []).map(deviceHealth);
   const ptStats = (data.points || []).map(ip => ({ ip, st: stats(`point:${ip}`, recent) }));
 
@@ -255,14 +258,14 @@ function render() {
   const il = worse(level(Math.min(cf.p95 ?? 1e9, gg.p95 ?? 1e9) - (onWifi ? (r.med || 0) : 0), net), lossLevel(Math.min(cf.loss ?? 0, gg.loss ?? 0)));
   const iLoss = Math.min(cf.loss ?? 0, gg.loss ?? 0);
   const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}% of replies`
-    : level(cf.med, net) === "good" ? `Mostly fast (${fmt(cf.med)} ms to Cloudflare) but with spikes up to ${fmt(cf.max)} ms`
-    : `Slow: ${fmt(cf.med)} ms to Cloudflare`;
+    : level(cf.med, net) === "good" ? `Mostly fast (${fmt(cf.med)} ms to ${first}) but with spikes up to ${fmt(cf.max)} ms`
+    : `Slow: ${fmt(cf.med)} ms to ${first}`;
   const dl = dns.med != null && dns.med > 150 ? "warning" : "good";
   areas.push({ name: "Internet", who: "The internet is", l: worse(il, dl), text:
     il !== "good" && rl === "good" ? `${iProblem}. Your home network is steady, so this is beyond your home, at your internet provider.`
     : il !== "good" ? `${iProblem}. The router shows it too, so the trouble starts inside your home${onWifi ? ", possibly Heimdall's own wifi" : ""}.`
-    : dl !== "good" ? `Fast, but website lookups are slow (${fmt(dns.med)} ms), so pages are slow to start loading. Try 1.1.1.1 for lookups in the Google Home app.`
-    : `Fast: ${fmt(cf.med)} ms to Cloudflare, website lookups ${fmt(dns.med)} ms.` });
+    : dl !== "good" ? `Fast, but website lookups are slow (${fmt(dns.med)} ms), so pages are slow to start loading. Try switching your router to a public lookup service such as 1.1.1.1.`
+    : `Fast: ${fmt(cf.med)} ms to ${first}, website lookups ${fmt(dns.med)} ms.` });
 
   const overall = worse(...areas.map(a => a.l));
   const top = areas.filter(a => a.l === overall)[0];
