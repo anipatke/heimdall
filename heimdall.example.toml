@@ -49,9 +49,16 @@
 # url = "https://signal.callmebot.com/signal/send.php?phone=+61400000000&apikey=123456&text={text}"
 # Or ntfy (free phone app): pick a hard-to-guess topic and subscribe to it in the app
 # url = "https://ntfy.sh/heimdall-pick-something-unguessable"
-# on = ["internet", "wifi_points", "restarts", "new_devices"]   # which alerts you want
+# on = ["internet", "wifi_points", "restarts", "new_devices", "daily_summary", "weekly_summary"]   # which alerts you want
 # internet_after = 60             # seconds without the internet before you're told
 # offline_after = 120             # seconds a wifi point can be silent before you're told
+# summary_hour = 8                # hour (0-23) the daily summary, and Monday's weekly one, are sent
+
+# Written reports from Claude on the Day and Week views and in the summaries. Off until you add an
+# Anthropic API key with ./install.sh --api-key (never put the key in this file). See the README.
+# [ai]
+# model = "claude-opus-5-5"       # or "claude-sonnet-5-5", or "claude-haiku-5-5" (cheapest)
+# on = false                      # turn reports off but keep the key
 
 # [logs]
 # max_mb = 100                    # each log is rotated to .old at this size (up to 2000)

@@ -18,6 +18,8 @@ phone, and you get:
 - **Live lines**: response time of the router, wifi points and internet over the last hour
 - **Comings and goings**: devices joining, leaving and restarting
 - **A speed test**, on demand
+- **Day and week reports**: what went wrong, where and when, compared with the day or week before
+  (`#day` and `#week`), and optionally a written report from Claude
 - **Alerts** on WhatsApp, Signal or ntfy when the internet drops, a wifi point
   stops answering or restarts, or a new device joins (optional)
 
@@ -127,6 +129,7 @@ Heimdall can message you when:
 - a wifi point hasn't answered for 2 minutes (and when it's back)
 - the router or a wifi point restarts
 - a device it has never seen before joins your network
+- every morning, a summary of the last 24 hours; on Mondays, of the last week (8 am by default)
 
 If Heimdall's own connection drops, it stays quiet rather than blaming everything else.
 
@@ -149,6 +152,73 @@ guess, then `url = "https://ntfy.sh/that-topic"`.
 Or paste the address into **⚙ Settings → Alerts** and press **Send test**. You can
 also pick which alerts you want there. From the command line: `python3 server.py --test-alert`, then restart Heimdall
 (`sudo systemctl restart heimdall`). Alert text goes through whichever service you choose.
+
+## Day and week reports
+
+**Last 24 h** and **Last 7 days** at the top of the dashboard look back over what Heimdall has
+seen. Every reading is rolled up by the hour as it comes in and kept for two weeks in
+`trends.json`. The first time, Heimdall builds this from the logs it already has.
+
+Each view gives:
+
+- **Findings** in plain English: whether trouble was inside your home (the router itself went
+  slow or silent) or your provider's (the internet dropped while the router was fine), how long
+  it lasted and when, which wifi point is weakest, devices dropping off together, restarts, and
+  how it compares with the day or week before
+- **When things went wrong**: each hour's share of slow or lost replies; for a week, a grid of
+  days by hours, which shows up problems that come back at the same time each day
+- **Slowest replies each hour**, a table per wifi point, the worst moments, and always-on
+  devices that miss replies
+
+The same findings go out as the daily and weekly summaries if alerts are on, and print in a
+terminal with `python3 server.py --report day` (or `week`).
+
+### A written report from Claude (optional)
+
+Claude can read the same figures and write you a short report: what happened, the likely
+causes, and what to try. It writes one for the last 24 hours each morning, and one for the
+week on Mondays, at the summary hour (8 am by default), plus one of each the first time
+Heimdall starts with a key. They appear on the Day and Week views, and each one's opening
+paragraph replaces the rule-based summary on your phone. There's no button to ask for more,
+so the cost stays predictable: about 37 reports a month.
+
+This is the one feature that sends data about your network out of your home. Each report
+sends Anthropic that stretch's hourly figures, problem times, device names and addresses on
+your network (not hardware addresses). It needs an
+[Anthropic API key](https://platform.claude.com) and costs a few cents a report
+(Claude Opus 5.5; that comes to a few dollars a month). Use a key from a workspace of its
+own with a monthly spend limit, so the cost is capped whatever happens.
+
+```sh
+./install.sh --api-key
+```
+
+This asks for the key without showing it, so it never lands in your shell history. It stores
+the key in `/etc/heimdall/anthropic_key`, readable by root only, and systemd hands it to the
+Heimdall service as a credential (`LoadCredential`), not as an environment variable. While
+Heimdall runs, the key can be read by root and by programs running as the user Heimdall runs
+as (you), so keep it a key just for Heimdall, with a spending limit set at platform.claude.com.
+It also installs a pinned version of the `anthropic` package into `.venv` next to `server.py`,
+not system-wide. `./install.sh --forget-api-key` deletes the key and turns reports off;
+revoke it at platform.claude.com too.
+
+Nobody on your network ever sees the key, or can make Heimdall use it: the dashboard only
+shows the reports and says whether they're on.
+
+The key is never read from `heimdall.toml`, which anyone on the machine can read. To run by
+hand with reports, set the key without it landing in your shell history, then start Heimdall:
+
+```sh
+read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY   # paste the key, then Enter
+.venv/bin/python server.py
+```
+To use a cheaper model, or turn reports off while keeping the key:
+
+```toml
+[ai]
+model = "claude-sonnet-5-5"   # default claude-opus-5-5; claude-haiku-5-5 is cheapest
+# on = false
+```
 
 ## What it does to your network
 
@@ -173,9 +243,11 @@ Heimdall sees which devices are switched on, when they come and go, who made
 them and how quickly they answer. It can't see what they do online or how much
 data each uses; your router keeps that to itself.
 
-Readings are kept on the machine running Heimdall, in `log.csv`, `devices.csv`
-and `state.json` next to `server.py`, and never sent anywhere. If you turn on
-alerts, only the alert messages leave your network. Each log is
+Readings are kept on the machine running Heimdall, in `log.csv`, `devices.csv`,
+`state.json` and `trends.json` next to `server.py`, and never sent anywhere. If you turn on
+alerts, only the alert messages leave your network. If you add an Anthropic API key, a
+summary of each report's figures goes to Anthropic too (see
+[A written report from Claude](#a-written-report-from-claude-optional)). Each log is
 capped at 100 MB (`[logs] max_mb`). When it fills up it's renamed to `.old`, replacing the
 previous one, so the logs never take more than about 400 MB.
 
@@ -211,11 +283,12 @@ VPN gives this machine, add that name to `allowed_hosts`.
 
 ## How it works
 
-Two files, standard library only:
+Two files, standard library only (the optional Claude reports use the `anthropic` package):
 
 - **`server.py`** runs a handful of background threads (pings, DNS timing, device
   scans, mesh status) and serves the page plus a `/data` endpoint the page polls
-  for new readings
+  for new readings. `tally` rolls every reading into hourly buckets, and `trend_report` /
+  `findings` turn them into the `/trends` endpoint and the summaries
 - **`index.html`** is the whole dashboard: plain HTML, CSS and JavaScript with
   hand-drawn SVG charts, no build step
 

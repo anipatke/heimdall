@@ -7,3 +7,5 @@ heimdall.toml
 state.json.tmp
 *.bak
 *.tmp
+trends.json
+.venv/
