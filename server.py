@@ -5,25 +5,65 @@ if sys.version_info < (3, 11):
     raise SystemExit("Heimdall needs Python 3.11 or newer.")
 if not (shutil.which("ip") and shutil.which("ping")):
     raise SystemExit("Heimdall needs the ip and ping commands (Linux).")
-import ipaddress, json, os, random, re, socket, struct, subprocess, threading, time, tomllib, csv
+import http.client, ipaddress, json, math, os, random, re, socket, ssl, struct, subprocess, threading, time, tomllib, csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, quote
-from urllib.request import urlopen, Request, build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.parse import urlparse, urlsplit, parse_qs, quote
+from urllib.request import urlopen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 C_LOCALE = {**os.environ, "LC_ALL": "C"}  # ping and ip output is parsed, so keep it in English whatever the system language
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *a):
-        return None
+def http_fetch(host, port, path, *, addr=None, https=False, data=None, timeout=5, limit=65536):
+    """One HTTP request to a device at home or an alert service; returns (status, first `limit` bytes of the body).
+    - timeout covers the whole request, not each read, so something sending a byte every few seconds can't hold us up
+    - addr: connect to this already-checked address while still using `host` as the name (and for the https
+      certificate), so a name can't point somewhere else between being checked and being connected to
+    - never follows redirects or uses a proxy, which could also take the request somewhere unchecked"""
+    if https:
+        conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    if addr:
+        def connect():
+            conn.sock = socket.create_connection((addr, port), timeout)
+            if https:
+                conn.sock = conn._context.wrap_socket(conn.sock, server_hostname=host)
+        conn.connect = connect
+
+    sock = []  # our own hold on the socket: http.client lets go of it once the headers are in
+
+    def cut():
+        for s in sock:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    deadline = threading.Timer(timeout, cut)
+    deadline.start()
+    try:
+        conn.connect()
+        sock.append(conn.sock)
+        conn.request("GET" if data is None else "POST", path, body=data)
+        r = conn.getresponse()
+        return r.status, r.read(limit)
+    finally:
+        deadline.cancel()
+        conn.close()
 
 
-# For reading status pages of devices at home: no proxy, and no following a device's redirect somewhere else.
-LOCAL = build_opener(ProxyHandler({}), _NoRedirect)
-OUT = build_opener(_NoRedirect)  # alerts: a redirect could point back into this machine, past the checks below
+def finite(text):
+    """For json.loads: numbers from other devices must be real numbers, not Infinity or NaN (which the page can't read)."""
+    v = float(text)
+    if not math.isfinite(v):
+        raise ValueError("not a finite number")
+    return v
+
+
+def no_constants(name):
+    raise ValueError(f"{name} isn't allowed")
 
 
 CONFIG = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
@@ -111,6 +151,9 @@ if NET.num_addresses > 1024:
     NET = ipaddress.ip_interface(f"{MY_IP}/22").network
 # every address this machine answers to (it may have a second one just for heimdall.local)
 MY_IPS = set(re.findall(r"inet (\S+)/", subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, env=C_LOCALE).stdout)) | {MY_IP}
+# the same, IPv6 too, for keeping alerts from being sent back into this machine
+OWN = {ipaddress.ip_address(a.split("%")[0]) for a in re.findall(r"inet6? (\S+)/", subprocess.run(
+    ["ip", "-o", "addr"], capture_output=True, text=True, env=C_LOCALE).stdout)} | {ipaddress.ip_address(MY_IP)}
 # (pattern in the device's network name, friendly type) - first match wins; heimdall.toml's [[kinds]] go first
 KINDS = [(k["match"], k["kind"]) for k in EXTRA_KINDS] + [(r"nest-wifi-point|google-wifi", "Wifi point"), (r"google-home|nest-(mini|audio|hub)", "Smart speaker"),
          (r"sonos", "Sonos speaker"), (r"^esp_|tasmota|shelly", "Smart-home gadget"),
@@ -181,18 +224,32 @@ def record(kind, value):
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
 
 
-def alert_url_problem(url):
-    """Why an alert address can't be used, or None. Alerts go to services out there or elsewhere at home,
-    never back into this machine, so the settings page can't be used to poke at what runs here."""
-    m = re.fullmatch(r"(https?)://([^/:?#\s]+|\[[0-9a-fA-F:]+\])(:\d+)?([/?#]\S*)?", url) if len(url) <= 500 else None
-    if not m:
-        return "The alert address should be a web address starting with http:// or https://"
+def off_limits(a):
+    """Addresses alerts may never go to: this machine, by any of its addresses or loopback, and link-local ones."""
+    if a.version == 6 and a.ipv4_mapped:  # ::ffff:192.168.1.10 is 192.168.1.10
+        a = a.ipv4_mapped
+    return a.is_loopback or a.is_link_local or a.is_unspecified or a.is_multicast or a in OWN
+
+
+def alert_target(url):
+    """(problem, None), or (None, (https, host, port, path, address)) with the one address to connect to.
+    Alerts go to services out there or elsewhere at home, never back into this machine, so the settings page
+    can't be used to poke at what runs here. The address is checked once here and then used as-is."""
+    if len(url) > 500 or not re.fullmatch(r"https?://\S+", url):
+        return "The alert address should be a web address starting with http:// or https://", None
     try:
-        addrs = {ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(m.group(2).strip("[]"), None)}
-    except (OSError, ValueError):
-        return "Couldn't find that alert address"
-    if any(a.is_loopback or a.is_link_local or a.is_unspecified or a.is_multicast or str(a) in MY_IPS for a in addrs):
-        return "Alerts can't be sent to this machine itself"
+        u = urlsplit(url)
+        port = u.port or (443 if u.scheme == "https" else 80)
+        addrs = [ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(u.hostname, port, type=socket.SOCK_STREAM)]
+    except (OSError, ValueError, TypeError):
+        return "Couldn't find that alert address", None
+    if not addrs or any(map(off_limits, addrs)):
+        return "Alerts can't be sent to this machine itself", None
+    return None, (u.scheme == "https", u.hostname, port, (u.path or "/") + (f"?{u.query}" if u.query else ""), str(addrs[0]))
+
+
+def alert_url_problem(url):
+    return alert_target(url)[0]
 
 
 def send_alert(text, url=None):
@@ -200,14 +257,17 @@ def send_alert(text, url=None):
     Signal via CallMeBot); otherwise the message is POSTed as the body (ntfy and most webhooks). Returns an error or None."""
     text = f"Heimdall: {text}"
     url = url or ALERTS["url"]
-    if problem := alert_url_problem(url):
+    get = "{text}" in url
+    problem, target = alert_target(url.replace("{text}", quote(text, safe="")) if get else url)
+    if problem:
         return problem
+    https, host, port, path, addr = target
     try:
-        req = url.replace("{text}", quote(text, safe="")) if "{text}" in url else Request(url, data=text.encode())
-        with OUT.open(req, timeout=20) as r:
-            r.read(65536)
+        status, _ = http_fetch(host, port, path, addr=addr, https=https, data=None if get else text.encode(), timeout=20)
     except Exception as e:
         return f"Couldn't send alert: {e}"
+    if status >= 300:
+        return f"Couldn't send alert: the service answered {status}"
 
 
 def alert(text):
@@ -283,16 +343,26 @@ def pinger(name, host):
 
 
 def dns_query(server, name, timeout=2.0):
+    """How long one website lookup through `server` takes, in ms, or None if it failed: no answer in time, or an
+    answer saying the name couldn't be looked up (SERVFAIL, REFUSED...). Stray replies are ignored."""
     qid = random.randint(0, 65535)
     q = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
     q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0" + struct.pack(">HH", 1, 1)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.settimeout(timeout)
     try:
         t0 = time.perf_counter()
         s.sendto(q, (server, 53))
-        s.recvfrom(512)
-        return round((time.perf_counter() - t0) * 1000, 1)
+        while (left := t0 + timeout - time.perf_counter()) > 0:
+            s.settimeout(left)
+            data, peer = s.recvfrom(512)
+            # an answer to our question, from the server we asked: same id, "this is a reply" bit, question echoed back
+            if peer[0] != server or len(data) < len(q) or data[12:len(q)] != q[12:]:
+                continue
+            rid, flags = struct.unpack(">HH", data[:4])
+            if rid != qid or not flags & 0x8000:
+                continue
+            return round((time.perf_counter() - t0) * 1000, 1) if flags & 0xF == 0 else None  # result code 0: it worked
+        return None
     except OSError:
         return None
     finally:
@@ -386,6 +456,13 @@ def neighbours(confirmed=False):
             if ipaddress.ip_address(ip) in NET and ip not in MY_IPS and (not confirmed or st == "REACHABLE")}
 
 
+def reverse_name(ip):
+    try:
+        return socket.gethostbyaddr(ip)[0].removesuffix(".lan")
+    except OSError:
+        return ""
+
+
 def scan_loop():
     while True:
         now = time.time()
@@ -400,6 +477,11 @@ def scan_loop():
             results.update({ip: r for ip, r in zip(rest, pool.map(lambda ip: probe(ip, 1, arp=False), rest)) if r})
         results[MY_IP] = (0.0, 0.0, 0)
         macs.update(neighbours())
+        # names for devices seen for the first time, looked up before taking the lock: a slow lookup mustn't
+        # hold up the dashboard
+        new = [ip for ip, r in results.items() if r and ip not in devices]
+        with ThreadPoolExecutor(8) as pool:
+            reverse = dict(zip(new, pool.map(reverse_name, new)))
         rows = []
         with lock:
             for ip, r in results.items():
@@ -414,11 +496,7 @@ def scan_loop():
                             events.append({"t": now, "ip": ip, "name": d["name"], "what": "left"})
                     continue
                 if not d:
-                    try:
-                        name = socket.gethostbyaddr(ip)[0].removesuffix(".lan")
-                    except OSError:
-                        name = ""
-                    name = NAMES.get(ip, name)
+                    name = NAMES.get(ip, reverse.get(ip, ""))
                     vendor = vendor_of(macs.get(ip))
                     if "new_devices" in ALERT_ON and (state["last_scan"] or restored) and macs.get(ip) not in {x.get("mac") for x in devices.values()}:
                         alert(f"New device joined: {name or 'no name'} ({vendor or 'unknown maker'}) at {ip}")
@@ -501,8 +579,8 @@ def status_page(ip, timeout):
     """A Google/Nest unit's own status page, as a dict, or None. Read at most 64 KB, since any device at home
     could answer on that address, and something that never stops sending mustn't use up all our memory."""
     try:
-        with LOCAL.open(f"http://{ip}/api/v1/status", timeout=timeout) as r:
-            st = json.loads(r.read(65536))
+        status, body = http_fetch(ip, 80, "/api/v1/status", timeout=timeout)
+        st = json.loads(body, parse_float=finite, parse_constant=no_constants) if status == 200 else None
     except Exception:
         return None
     return st if isinstance(st, dict) else None
@@ -551,7 +629,7 @@ def mesh_loop():
             # anything that isn't the shape we expect is treated as missing, so one odd unit can't stop the rest
             sysinfo, sw, wan = (st.get(k) if isinstance(st.get(k), dict) else {} for k in ("system", "software", "wan"))
             now, up = time.time(), sysinfo.get("uptime")
-            up = up if type(up) in (int, float) else None
+            up = up if type(up) in (int, float) and math.isfinite(up) else None
             old = mesh.get(ip)
             with lock:
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
@@ -701,9 +779,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def host_ok(self):
-        host = (self.headers.get("Host") or "").lower()
-        host = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
-        if host in HOSTS:
+        hosts = self.headers.get_all("Host") or []
+        m = re.fullmatch(r"(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(:\d{1,5})?", hosts[0].lower()) if len(hosts) == 1 else None
+        if m and m.group(1).strip("[]") in HOSTS:
             return True
         self.send(f"Open Heimdall at http://{MDNS_NAME or MY_IP}:{PORT}/ (this address isn't one it answers to; "
                   "add it to allowed_hosts in heimdall.toml if it should be)".encode(), "text/plain; charset=utf-8", 421)

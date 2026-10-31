@@ -288,10 +288,13 @@ function render() {
   const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}%`
     : level(cf.med, net) === "good" ? `Spikes to ${fmt(cf.max)} ms`
     : `Slow: ${fmt(cf.med)} ms`;
-  const dl = dns.med != null && dns.med > T().lookups ? "warning" : "good";
+  // most lookups failing is serious even when the connection itself is fine: sites won't load
+  const dnsFailing = dns.n >= 5 && dns.loss >= 50;
+  const dl = dnsFailing ? "serious" : dns.med != null && dns.med > T().lookups ? "warning" : "good";
   areas.push({ name: "Internet", who: "The internet is", l: worse(il, dl), text:
     il !== "good" && rl === "good" ? `${iProblem}. Your home is fine, so it's your provider.`
     : il !== "good" ? `${iProblem}. The router too, so it's inside your home${onWifi ? " (maybe Heimdall's wifi)" : ""}.`
+    : dnsFailing ? `Connected, but ${fmt(dns.loss)}% of website lookups are failing, so sites won't load. Restart the router, or try 1.1.1.1 as its DNS.`
     : dl !== "good" ? `Fast, but lookups are slow (${fmt(dns.med)} ms). Try 1.1.1.1 as your router's DNS.`
     : `${fmt(cf.med)} ms, lookups ${fmt(dns.med)} ms.` });
 
