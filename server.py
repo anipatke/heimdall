@@ -653,7 +653,23 @@ def summary_text(rep):
 # ---- Optional: Claude writes the report. Off unless an Anthropic API key is found, since it sends a summary of your
 # network (hourly figures, problem times, device names; no hardware addresses) to Anthropic.
 AI = RAW.get("ai", {})
-AI_MODEL = AI.get("model", "claude-opus-5-5")
+# Settings picked from a list: (default, choices). Cost per report is roughly model price x how hard Claude thinks.
+CHOICES = {
+    ("ai", "model"): ("claude-opus-5-5", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
+    ("ai", "effort"): ("high", ["low", "medium", "high", "xhigh", "max"]),
+}
+
+
+def choice(section, key):
+    """A setting picked from a list: from heimdall.toml, or its default. A model typed into the file by hand that
+    isn't in the list is used as-is; an effort that isn't one of the levels falls back to the default."""
+    default, options = CHOICES[(section, key)]
+    v = RAW.get(section, {}).get(key, default)
+    return v if isinstance(v, str) and (v in options or key == "model") else default
+
+
+AI_MODEL = choice("ai", "model")
+AI_EFFORT = choice("ai", "effort")
 
 
 def ai_key():
@@ -789,7 +805,7 @@ def ai_report(days):
         extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
     try:
         msg = client.beta.messages.create(
-            model=AI_MODEL, max_tokens=8000, output_config={"effort": "high"}, system=AI_SYSTEM,
+            model=AI_MODEL, max_tokens=16000, output_config={"effort": AI_EFFORT}, system=AI_SYSTEM,
             messages=[{"role": "user", "content": ai_input(rep)}], **extra)
     except anthropic.AuthenticationError:
         return {"at": time.time(), "error": "Anthropic didn't accept the API key. Set it again with ./install.sh --api-key."}
@@ -1314,7 +1330,7 @@ def save_settings(new):
     """Check what the settings page sent and merge it into heimdall.toml. Returns a problem to show, or None.
     Settings left at their default are taken out of the file, so it only holds what you changed."""
     cfg = load_config()[3]  # fresh from disk, so hand edits since startup aren't lost
-    if not all(isinstance(new.get(s, {}), dict) for s in ("checks", "thresholds", "alerts", "logs", "names")):
+    if not all(isinstance(new.get(s, {}), dict) for s in ("checks", "thresholds", "alerts", "logs", "names", "ai")):
         return "That didn't look like settings."
     for (section, k), (default, lo, hi) in EDITABLE.items():
         if k not in new.get(section, {}):
@@ -1326,6 +1342,16 @@ def save_settings(new):
             return f"{section}.{k}: numbers between {lo} and {hi}, please"
         if nums != sorted(nums):
             return f"{section}.{k}: each number should be at least the one before"
+        if v == default:
+            cfg.get(section, {}).pop(k, None)
+        else:
+            cfg.setdefault(section, {})[k] = v
+    for (section, k), (default, options) in CHOICES.items():
+        if k not in new.get(section, {}):
+            continue
+        v = new[section][k]
+        if v not in options and v != cfg.get(section, {}).get(k):  # what's in the file is always fine, even set by hand
+            return f"{section}.{k}: one of {', '.join(options)}, please"
         if v == default:
             cfg.get(section, {}).pop(k, None)
         else:
@@ -1431,13 +1457,15 @@ class Handler(BaseHTTPRequestHandler):
             rep = trend_report(days)
             with trend_lock:
                 e = dict(ai_entry(days))
-            rep["ai"] = {"on": bool(AI_KEY), "model": AI_MODEL, "running": days in ai_running, "next_at": ai_next(days), **e}
+            rep["ai"] = {"on": bool(AI_KEY), "model": AI_MODEL, "effort": AI_EFFORT, "running": days in ai_running, "next_at": ai_next(days), **e}
             self.send(json.dumps(rep, separators=(",", ":")).encode(), "application/json")
         elif url.path == "/settings":
             self.send(json.dumps({
                 "values": {s: {k: conf(s, k) for s2, k in EDITABLE if s2 == s} for s, _ in EDITABLE},
                 "defaults": {s: {k: d for (s2, k), (d, _, _) in EDITABLE.items() if s2 == s} for s, _ in EDITABLE},
                 "limits": {f"{s}.{k}": [lo, hi] for (s, k), (_, lo, hi) in EDITABLE.items()},
+                "choices": {f"{s}.{k}": {"value": choice(s, k), "default": d, "options": o} for (s, k), (d, o) in CHOICES.items()},
+                "ai_on": bool(AI_KEY),
                 # where alerts go, but not the whole address: for ntfy that's the secret, for CallMeBot the key
                 "alerts": {"saved": re.sub(r"^(https?://[^/?#]+).*", r"\1/…", ALERTS.get("url", "")), "on": sorted(ALERT_ON)},
                 "all_alerts": ALL_ALERTS, "names": NAMES, "router": ROUTER, "points": point_list()}).encode(), "application/json")
