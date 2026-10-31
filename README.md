@@ -58,13 +58,24 @@ firewall is in the way. `./install.sh` below sorts that out for ufw.
 ```
 
 This installs a systemd service that starts at boot and restarts if it stops.
-Heimdall runs as you, not root. sudo is only used to install the service and, if
-ufw is on, to let devices at home (and nothing outside) reach the dashboard.
+Heimdall runs as its own user, `heimdall`: not as you, and not as root. It's locked down to
+what it needs (pinging and reading the network) and can't touch your home folder:
 
-Logs: `journalctl -u heimdall -f`. Remove it all: `./install.sh --uninstall`.
+- **Code** is copied to `/opt/heimdall`, owned by root, so Heimdall can't change what it runs.
+  After a `git pull`, run `./install.sh` again to update it.
+- **Logs, settings and saved state** live in `/var/lib/heimdall`. The first install moves
+  them there from the repo. You're added to the `heimdall` group, so you can read them
+  (after logging in again) without sudo.
+
+sudo is only used to set this up and, if ufw is on, to let devices at home (and nothing
+outside) reach the dashboard.
+
+Logs: `journalctl -u heimdall -f`. Remove the service: `./install.sh --uninstall` (it
+says how to delete the data too).
 
 **Want plain `http://heimdall.local`, without `:8765`?** If nothing else on the
-machine uses port 80, set `port = 80` in `heimdall.toml` and run `./install.sh`.
+machine uses port 80, set `port = 80` in `heimdall.toml` (`/var/lib/heimdall/heimdall.toml`
+once installed) and run `./install.sh`.
 If something already does, give Heimdall its own address. Pick one that's free
 and outside the range your router hands out:
 
@@ -83,7 +94,8 @@ wifi hop, and the dashboard says so.
 Everything is optional. The easiest way to change things is **⚙ Settings** on
 the dashboard: how often each check runs, what counts as slow, alerts, wifi point
 names and log size. Saving writes `heimdall.toml` (keeping the previous one as
-`heimdall.toml.bak`) and Heimdall restarts itself to apply it. There's no login,
+`heimdall.toml.bak`) and Heimdall restarts itself to apply it. Installed as a service, it
+lives in `/var/lib/heimdall`; run by hand, next to `server.py`. There's no login,
 so anyone on your home network can change these.
 
 You can also edit `heimdall.toml` by hand; `heimdall.example.toml` lists every
@@ -171,7 +183,8 @@ Each view gives:
   devices that miss replies
 
 The same findings go out as the daily and weekly summaries if alerts are on, and print in a
-terminal with `python3 server.py --report day` (or `week`).
+terminal with `python3 server.py --report day` (or `week`). Installed as a service, point it
+at the service's data: `HEIMDALL_DATA=/var/lib/heimdall python3 server.py --report day`.
 
 ### A written report from Claude (optional)
 
@@ -196,21 +209,21 @@ own with a monthly spend limit, so the cost is capped whatever happens.
 This asks for the key without showing it, so it never lands in your shell history. It stores
 the key in `/etc/heimdall/anthropic_key`, readable by root only, and systemd hands it to the
 Heimdall service as a credential (`LoadCredential`), not as an environment variable. While
-Heimdall runs, the key can be read by root and by programs running as the user Heimdall runs
-as (you), so keep it a key just for Heimdall, with a spending limit set at platform.claude.com.
-It also installs a pinned version of the `anthropic` package into `.venv` next to `server.py`,
-not system-wide. `./install.sh --forget-api-key` deletes the key and turns reports off;
+Heimdall runs, only root and the `heimdall` user can read it: not you, and not other programs
+you run. Still, make it a key just for Heimdall, from a workspace with a spending limit at
+platform.claude.com. It also installs a pinned version of the `anthropic` package into
+`/opt/heimdall/.venv`, owned by root, not system-wide. `./install.sh --forget-api-key` deletes the key and turns reports off;
 revoke it at platform.claude.com too.
 
 Nobody on your network ever sees the key, or can make Heimdall use it: the dashboard only
 shows the reports and says whether they're on.
 
-The key is never read from `heimdall.toml`, which anyone on the machine can read. To run by
+The key is never read from `heimdall.toml`, which isn't meant for secrets. To run by
 hand with reports, set the key without it landing in your shell history, then start Heimdall:
 
 ```sh
 read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY   # paste the key, then Enter
-.venv/bin/python server.py
+python3 server.py      # needs the anthropic package: pip install anthropic==2.3.0 in a venv
 ```
 To use a cheaper model, or turn reports off while keeping the key:
 
@@ -244,7 +257,9 @@ them and how quickly they answer. It can't see what they do online or how much
 data each uses; your router keeps that to itself.
 
 Readings are kept on the machine running Heimdall, in `log.csv`, `devices.csv`,
-`state.json` and `trends.json` next to `server.py`, and never sent anywhere. If you turn on
+`state.json` and `trends.json` (in `/var/lib/heimdall` when installed as a service, readable
+by Heimdall and the `heimdall` group only; next to `server.py` when run by hand), and never
+sent anywhere. If you turn on
 alerts, only the alert messages leave your network. If you add an Anthropic API key, a
 summary of each report's figures goes to Anthropic too (see
 [A written report from Claude](#a-written-report-from-claude-optional)). Each log is
