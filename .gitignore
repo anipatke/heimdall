@@ -1,2 +1,4 @@
 log.csv
 __pycache__/
+devices.csv
+state.json
