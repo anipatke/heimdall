@@ -78,8 +78,15 @@ wifi hop, and the dashboard says so.
 
 ## Settings
 
-Everything is optional. Copy `heimdall.example.toml` to `heimdall.toml` and
-change only what you need:
+Everything is optional. The easiest way to change things is **⚙ Settings** on
+the dashboard: how often each check runs, what counts as slow, alerts, wifi point
+names and log size. Saving writes `heimdall.toml` (keeping the previous one as
+`heimdall.toml.bak`) and Heimdall restarts itself to apply it. There's no login,
+so anyone on your home network can change these.
+
+You can also edit `heimdall.toml` by hand; `heimdall.example.toml` lists every
+setting. Port, address and router can only be changed there, since a mistake
+could lock you out of the page:
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -89,11 +96,18 @@ change only what you need:
 | `mdns_ip` | this machine | Address that name points at |
 | `router` | detected | Your router's address |
 | `network` | detected | Address range to look for devices in (up to 1024 addresses) |
+| `ping_every` | 1 | Seconds between pings to the router, internet and wifi points |
+| `dns_every` | 5 | Seconds between website lookup timings |
+| `mesh_every` | 60 | Seconds between reads of each wifi point's status |
 | `device_every` | 60 | Seconds between checks of known devices |
+| `pings_per_check` | 3 | Pings per device check |
 | `sweep_every` | 600 | Seconds between sweeps for new devices |
+| `speedtest_mb` | 25 | Speed test download size |
 | `dns_names` | a few big sites | Names used to time website lookups |
 | `[checks.internet]` | Cloudflare, Google | Servers that stand in for "the internet" |
-| `[alerts]` | off | Where to send alerts; see below |
+| `[thresholds]` | see example | What counts as good, fair and poor |
+| `[alerts]` | off | Where to send alerts, which ones, and after how long; see below |
+| `[logs] max_mb` | 100 | Size each log can reach before it's rotated |
 | `[names]` | | Your own names for devices and wifi points, by address |
 | `[[kinds]]` | | Your own rules for naming device types |
 
@@ -131,7 +145,8 @@ url = "https://api.callmebot.com/whatsapp.php?phone=+61400000000&apikey=123456&t
 **ntfy**: install the [ntfy app](https://ntfy.sh), subscribe to a topic name nobody would
 guess, then `url = "https://ntfy.sh/that-topic"`.
 
-Check it works with `python3 server.py --test-alert`, then restart Heimdall
+Or paste the address into **⚙ Settings → Alerts** and press **Send test**. You can
+also pick which alerts you want there. From the command line: `python3 server.py --test-alert`, then restart Heimdall
 (`sudo systemctl restart heimdall`). Alert text goes through whichever service you choose.
 
 ## What it does to your network
@@ -160,7 +175,7 @@ data each uses; your router keeps that to itself.
 Readings are kept on the machine running Heimdall, in `log.csv`, `devices.csv`
 and `state.json` next to `server.py`, and never sent anywhere. If you turn on
 alerts, only the alert messages leave your network. Each log is
-capped at 100 MB. When it fills up it's renamed to `.old`, replacing the
+capped at 100 MB (`[logs] max_mb`). When it fills up it's renamed to `.old`, replacing the
 previous one, so the logs never take more than about 400 MB.
 
 The dashboard has no login. Anyone on your home network can open it and see

@@ -1,4 +1,5 @@
-# Heimdall settings. Copy to heimdall.toml and change what you need.
+# Heimdall settings. Most can be changed from Settings on the dashboard, which writes heimdall.toml for you.
+# To edit by hand, copy this to heimdall.toml and change what you need.
 # Everything here is optional: leave a line out and Heimdall uses the default or works it out.
 # Environment variables PORT, HOST, ROUTER, MDNS_NAME and MDNS_IP override this file.
 
@@ -13,14 +14,31 @@
 # network = "192.168.1.0/24"      # default: the network this machine is on (sweeps cap at 1024 addresses)
 
 [checks]
-# device_every = 60               # seconds between checks of known devices (3 pings each)
+# ping_every = 1                  # seconds between pings to the router, internet and wifi points (0.2 at the fastest)
+# dns_every = 5                   # seconds between website lookup timings
+# mesh_every = 60                 # seconds between reads of each wifi point's status page
+# device_every = 60               # seconds between checks of known devices
+# pings_per_check = 3             # pings per device check
 # sweep_every = 600               # seconds between sweeps for new devices (1 ping per address)
+# speedtest_mb = 25               # speed test download size
 # dns_names = ["google.com", "bbc.co.uk", "github.com"]   # names to time website lookups with
 
 # What "the internet" means. The first one is drawn on the chart.
 # [checks.internet]
 # cloudflare = "1.1.1.1"
 # google = "8.8.8.8"
+
+# What counts as slow. Three numbers are [good, fair, poor]: under the first is good, under the second
+# fair, under the third poor, and anything above is bad. Response times are in ms.
+# [thresholds]
+# router = [10, 30, 100]          # Heimdall on cable
+# router_wifi = [30, 80, 200]     # Heimdall on wifi: every reading includes its own hop
+# wifi_point_extra = [20, 40, 100]   # added to the router's limits for wifi points
+# internet = [30, 60, 150]
+# loss = [0, 2, 5]                # % of replies lost; good means at or under the first
+# lookups = 150                   # website lookups slower than this are flagged
+# device = [60, 150]              # "a little slow", "slow to answer" (napping phones and gadgets are never called slow)
+# device_missed = [10, 34]        # % of replies missed: "missing replies", "not answering"
 
 # Alerts: Heimdall messages you when the internet goes down, a wifi point stops answering or restarts,
 # or a new device joins. Test with: python3 server.py --test-alert
@@ -30,7 +48,12 @@
 # url = "https://signal.callmebot.com/signal/send.php?phone=+61400000000&apikey=123456&text={text}"
 # Or ntfy (free phone app): pick a hard-to-guess topic and subscribe to it in the app
 # url = "https://ntfy.sh/heimdall-pick-something-unguessable"
+# on = ["internet", "wifi_points", "restarts", "new_devices"]   # which alerts you want
+# internet_after = 60             # seconds without the internet before you're told
 # offline_after = 120             # seconds a wifi point can be silent before you're told
+
+# [logs]
+# max_mb = 100                    # each log is rotated to .old at this size
 
 # Your own names for devices and wifi points, by address. Shown everywhere instead of ".138" or a network name.
 # [names]

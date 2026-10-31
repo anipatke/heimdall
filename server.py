@@ -15,19 +15,51 @@ from urllib.request import urlopen, Request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+CONFIG = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
+
+# What the settings page can change: (section, key) -> (default, lowest, highest). A list default means
+# [good, fair, poor] limits: under each number is that level. Port, address and router stay file-only,
+# since a mistake there could lock you out of the page.
+EDITABLE = {
+    ("checks", "ping_every"): (1, 0.2, 60),  # router, internet and wifi points; ping refuses faster without root
+    ("checks", "dns_every"): (5, 1, 3600),
+    ("checks", "mesh_every"): (60, 10, 3600),
+    ("checks", "device_every"): (60, 15, 3600),
+    ("checks", "pings_per_check"): (3, 1, 10),
+    ("checks", "sweep_every"): (600, 60, 86400),
+    ("checks", "speedtest_mb"): (25, 1, 1000),
+    ("thresholds", "router"): ([10, 30, 100], 0, 60000),
+    ("thresholds", "router_wifi"): ([30, 80, 200], 0, 60000),  # Heimdall on wifi: every reading includes its own hop
+    ("thresholds", "wifi_point_extra"): ([20, 40, 100], 0, 60000),  # added to the router's limits
+    ("thresholds", "internet"): ([30, 60, 150], 0, 60000),
+    ("thresholds", "loss"): ([0, 2, 5], 0, 100),  # % lost; good means at or under the first
+    ("thresholds", "lookups"): (150, 1, 60000),
+    ("thresholds", "device"): ([60, 150], 1, 60000),  # "a little slow", "slow to answer"
+    ("thresholds", "device_missed"): ([10, 34], 1, 100),  # % missed: "missing replies", "not answering"
+    ("alerts", "internet_after"): (60, 10, 86400),
+    ("alerts", "offline_after"): (120, 10, 86400),
+    ("logs", "max_mb"): (100, 1, 100000),
+}
+ALL_ALERTS = ["internet", "wifi_points", "restarts", "new_devices"]
+
+
 def load_config():
     """Settings come from heimdall.toml (all optional), then environment variables. Anything unset is detected."""
-    path = os.environ.get("HEIMDALL_CONFIG", os.path.join(HERE, "heimdall.toml"))
     try:
-        with open(path, "rb") as f:
+        with open(CONFIG, "rb") as f:
             cfg = tomllib.load(f)
     except FileNotFoundError:
         cfg = {}
-    flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {}), "alerts": cfg.get("alerts", {})}
+    flat = {**cfg.get("server", {}), **cfg.get("network", {}), **cfg.get("checks", {})}
     for key in ("port", "host", "router", "mdns_name", "mdns_ip"):
         if os.environ.get(key.upper()):
             flat[key] = os.environ[key.upper()]
-    return flat, cfg.get("kinds", []), cfg.get("names", {})
+    return flat, cfg.get("kinds", []), cfg.get("names", {}), cfg
+
+
+def conf(section, key):
+    """An editable setting: from heimdall.toml, or its default."""
+    return RAW.get(section, {}).get(key, EDITABLE[(section, key)][0])
 
 
 def default_route():
@@ -39,15 +71,22 @@ def default_route():
     return m.group(1), m.group(2)
 
 
-CFG, EXTRA_KINDS, NAMES = load_config()  # NAMES: address -> your own name for it, from [names]
+CFG, EXTRA_KINDS, NAMES, RAW = load_config()  # NAMES: address -> your own name for it, from [names]
 _router, _dev = default_route()
 PORT = int(CFG.get("port", 8765))
 HOST = CFG.get("host", "0.0.0.0")
 ROUTER = CFG.get("router", _router)
 MDNS_NAME = CFG.get("mdns_name", "heimdall.local") or None  # announced to the home network; "" turns it off
 # Kept gentle on purpose: a busy scan clogs Heimdall's own link and makes every reading look worse.
-CHECK_EVERY = int(CFG.get("device_every", 60))   # re-check devices we already know about (3 pings each, a few at a time)
-SWEEP_EVERY = int(CFG.get("sweep_every", 600))   # look for new devices across the whole address range (1 ping each)
+CHECK_EVERY = int(conf("checks", "device_every"))   # re-check devices we already know about (a few pings each, a few at a time)
+SWEEP_EVERY = int(conf("checks", "sweep_every"))     # look for new devices across the whole address range (1 ping each)
+PINGS_PER_CHECK = int(conf("checks", "pings_per_check"))
+PING_EVERY = max(0.2, float(conf("checks", "ping_every")))
+DNS_EVERY = float(conf("checks", "dns_every"))
+MESH_EVERY = float(conf("checks", "mesh_every"))
+SPEEDTEST_MB = float(conf("checks", "speedtest_mb"))
+# What counts as good / fair / poor / bad. The page reads these too, so the dashboard and alerts agree.
+THRESHOLDS = {k: conf(s, k) for s, k in EDITABLE if s == "thresholds"}
 _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 _s.connect((ROUTER, 9))  # no packet sent; just picks the address we'd reach the router from
 MY_IP = _s.getsockname()[0]
@@ -90,8 +129,9 @@ KEEP = 3600  # seconds of history held in memory
 LOG = os.path.join(HERE, "log.csv")
 DEVICE_LOG = os.path.join(HERE, "devices.csv")
 SAVED = os.path.join(HERE, "state.json")  # device list kept across restarts
-LOG_MAX = 100_000_000  # bytes; a full log moves to .old, so each log takes at most twice this
-ALERTS = CFG["alerts"]  # url: where alerts go ({text} in it is filled in); offline_after: seconds before a wifi point counts as gone
+LOG_MAX = int(float(conf("logs", "max_mb")) * 1_000_000)  # a full log moves to .old, so each log takes at most twice this
+ALERTS = RAW.get("alerts", {})  # url: where alerts go ({text} in it is filled in); on: which kinds of alert
+ALERT_ON = set(ALERTS.get("on", ALL_ALERTS))
 START = time.time()
 
 lock = threading.Lock()
@@ -130,11 +170,11 @@ def record(kind, value):
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
 
 
-def send_alert(text):
+def send_alert(text, url=None):
     """Send one alert to [alerts] url. With {text} in the url it's a GET with the message filled in (WhatsApp or
     Signal via CallMeBot); otherwise the message is POSTed as the body (ntfy and most webhooks). Returns an error or None."""
     text = f"Heimdall: {text}"
-    url = ALERTS["url"]
+    url = url or ALERTS["url"]
     try:
         req = url.replace("{text}", quote(text, safe="")) if "{text}" in url else Request(url, data=text.encode())
         with urlopen(req, timeout=20) as r:
@@ -156,13 +196,16 @@ def point_label(ip):
 def alert_loop():
     """Every 10 s: has the internet or a wifi point gone quiet, or come back? One alert each way, not one per minute."""
     gone = {}  # what -> when it went quiet, for things we've alerted about
-    after = int(ALERTS.get("offline_after", 120))
+    after = int(conf("alerts", "offline_after"))
     while True:
         time.sleep(10)
         now = time.time()
         quiet = lambda kind: now - last_ok.get(kind, START)
-        checks = {"The internet": (min(quiet(k) for k in TARGETS if k != "router"), 60)}
-        checks |= {point_label(ip): (quiet(f"point:{ip}"), after) for ip in list(points)}
+        checks = {}
+        if "internet" in ALERT_ON:
+            checks["The internet"] = (min(quiet(k) for k in TARGETS if k != "router"), int(conf("alerts", "internet_after")))
+        if "wifi_points" in ALERT_ON:
+            checks |= {point_label(ip): (quiet(f"point:{ip}"), after) for ip in list(points)}
         # if even the router is silent, it's Heimdall's own connection that's down, so don't blame anything else
         heimdall_ok = quiet("router") < 30
         for what, (silent, limit) in checks.items():
@@ -190,7 +233,7 @@ def pinger(name, host):
     seq_re = re.compile(r"icmp_seq=(\d+).*time=([\d.]+)")
     miss_re = re.compile(r"no answer yet for icmp_seq=(\d+)")
     while True:
-        p = subprocess.Popen(["ping", "-n", "-O", "-i", "1", "-W", "2", host],
+        p = subprocess.Popen(["ping", "-n", "-O", "-i", str(PING_EVERY), "-W", "2", host],
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         late = {}  # seq -> when ping said "no answer yet"; a slow reply can still turn up
         try:
@@ -229,7 +272,7 @@ def dns_query(server, name, timeout=2.0):
 def dns_loop():
     while True:
         record("dns", dns_query(ROUTER, random.choice(DNS_NAMES)))
-        time.sleep(5)
+        time.sleep(DNS_EVERY)
 
 
 def read_link():
@@ -322,7 +365,7 @@ def scan_loop():
         known -= MY_IPS
         rest = [str(a) for a in NET.hosts() if str(a) not in known | MY_IPS] if sweep else []
         with ThreadPoolExecutor(8) as pool:
-            results = dict(zip(known, pool.map(lambda ip: probe(ip, 3), known)))
+            results = dict(zip(known, pool.map(lambda ip: probe(ip, PINGS_PER_CHECK), known)))
         with ThreadPoolExecutor(16) as pool:
             results.update({ip: r for ip, r in zip(rest, pool.map(lambda ip: probe(ip, 1, arp=False), rest)) if r})
         results[MY_IP] = (0.0, 0.0, 0)
@@ -333,7 +376,7 @@ def scan_loop():
                 d = devices.get(ip)
                 if r is None:
                     if d and d["online"]:
-                        d["rtt"] = (d["rtt"] + [(now, None, None, 3)])[-30:]
+                        d["rtt"] = (d["rtt"] + [(now, None, None, PINGS_PER_CHECK)])[-30:]
                         rows.append(d)
                         # one missed check can be a sleepy phone; call it gone after two
                         if now - d["last"] > CHECK_EVERY * 1.5:
@@ -347,7 +390,7 @@ def scan_loop():
                         name = ""
                     name = NAMES.get(ip, name)
                     vendor = vendor_of(macs.get(ip))
-                    if (state["last_scan"] or restored) and macs.get(ip) not in {x.get("mac") for x in devices.values()}:
+                    if "new_devices" in ALERT_ON and (state["last_scan"] or restored) and macs.get(ip) not in {x.get("mac") for x in devices.values()}:
                         alert(f"New device joined: {name or 'no name'} ({vendor or 'unknown maker'}) at {ip}")
                     d = devices[ip] = {"ip": ip, "name": name, "vendor": vendor, "kind": kind_of(ip, name, vendor), "first": now, "rtt": [], "online": False}
                 if not d["online"]:
@@ -465,20 +508,21 @@ def mesh_loop():
                 if old and up is not None and old.get("uptime") is not None and up < old["uptime"]:
                     name = NAMES.get(ip) or ("Router" if ip == ROUTER else f"Wifi point .{ip.rsplit('.', 1)[1]}")
                     events.append({"t": now, "ip": ip, "name": name, "what": "restarted"})
-                    alert(f"{'Router' if ip == ROUTER else point_label(ip)} restarted")
+                    if "restarts" in ALERT_ON:
+                        alert(f"{'Router' if ip == ROUTER else point_label(ip)} restarted")
                 mesh[ip] = {"ip": ip, "at": now, "uptime": up, "role": sysinfo.get("groupRole"), "model": sysinfo.get("modelId"),
                             "wired": sysinfo.get("lan0Link"), "led": sysinfo.get("ledAnimation"),
                             "version": sw.get("softwareVersion"), "update": sw.get("updateRequired") or sw.get("updateStatus") not in (None, "idle"),
                             "online": wan.get("online") if sysinfo.get("groupRole") == "root" else None,
                             "upstream": wan.get("gatewayIpAddress") if sysinfo.get("groupRole") == "root" else None}
-        time.sleep(60)
+        time.sleep(MESH_EVERY)
 
 
 def speed_test():
     state["speed_running"] = True
     try:
         t0 = time.perf_counter()
-        with urlopen("https://speed.cloudflare.com/__down?bytes=25000000", timeout=30) as r:
+        with urlopen(f"https://speed.cloudflare.com/__down?bytes={int(SPEEDTEST_MB * 1e6)}", timeout=30 + SPEEDTEST_MB) as r:
             n = len(r.read())
         state["speed"] = {"mbps": round(n * 8 / (time.perf_counter() - t0) / 1e6, 1), "at": time.time()}
         record("download_mbps", state["speed"]["mbps"])
@@ -486,6 +530,79 @@ def speed_test():
         state["speed"] = {"error": str(e), "at": time.time()}
     finally:
         state["speed_running"] = False
+
+
+def toml_text(cfg):
+    """heimdall.toml from a dict. Enough TOML for Heimdall's own settings: tables of numbers, strings and lists."""
+    val = lambda v: ("true" if v else "false") if isinstance(v, bool) else json.dumps(v) if isinstance(v, (str, int, float)) \
+        else "[" + ", ".join(map(val, v)) + "]"
+    key = lambda k: k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+    out = ["# Heimdall settings, saved from the settings page. Editing by hand is fine too; see heimdall.example.toml."]
+    for section, table in cfg.items():
+        for t in (table if isinstance(table, list) else [table]):  # [[kinds]] is a list of tables
+            flat = {k: v for k, v in t.items() if not isinstance(v, dict)}
+            out += ["", f"[[{section}]]" if isinstance(table, list) else f"[{section}]"] + [f"{key(k)} = {val(v)}" for k, v in flat.items()]
+            for sub, st in t.items():
+                if isinstance(st, dict):
+                    out += ["", f"[{section}.{key(sub)}]"] + [f"{key(k)} = {val(v)}" for k, v in st.items()]
+    return "\n".join(out) + "\n"
+
+
+def save_settings(new):
+    """Check what the settings page sent and merge it into heimdall.toml. Returns a problem to show, or None.
+    Settings left at their default are taken out of the file, so it only holds what you changed."""
+    cfg = load_config()[3]  # fresh from disk, so hand edits since startup aren't lost
+    for (section, k), (default, lo, hi) in EDITABLE.items():
+        if k not in new.get(section, {}):
+            continue
+        v = new[section][k]
+        nums = v if isinstance(default, list) else [v]
+        if not isinstance(nums, list) or len(nums) != (len(default) if isinstance(default, list) else 1) \
+                or not all(type(x) in (int, float) and lo <= x <= hi for x in nums):
+            return f"{section}.{k}: numbers between {lo} and {hi}, please"
+        if nums != sorted(nums):
+            return f"{section}.{k}: each number should be at least the one before"
+        if v == default:
+            cfg.get(section, {}).pop(k, None)
+        else:
+            cfg.setdefault(section, {})[k] = v
+    alerts = new.get("alerts", {})
+    if "url" in alerts:
+        u = str(alerts["url"]).strip()
+        if u and not re.fullmatch(r"https?://\S{3,500}", u):
+            return "The alert address should start with http:// or https://"
+        cfg.setdefault("alerts", {})["url"] = u
+        if not u:
+            cfg["alerts"].pop("url")
+    if "on" in alerts:
+        on = [a for a in ALL_ALERTS if a in alerts["on"]]
+        cfg.setdefault("alerts", {})["on"] = on
+        if on == ALL_ALERTS:
+            cfg["alerts"].pop("on")
+    for ip, name in new.get("names", {}).items():
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            return f"{ip} isn't an address"
+        name = str(name).strip()[:40]
+        cfg.setdefault("names", {})[ip] = name
+        if not name:
+            cfg["names"].pop(ip)
+    cfg = {s: t for s, t in cfg.items() if t}  # drop tables that ended up empty
+    text = toml_text(cfg)
+    if tomllib.loads(text) != cfg:  # never write a file that wouldn't read back the same
+        return "Couldn't write these settings safely, so nothing was changed."
+    if os.path.exists(CONFIG):
+        shutil.copyfile(CONFIG, CONFIG + ".bak")
+    with open(CONFIG + ".tmp", "w") as f:
+        f.write(text)
+    os.replace(CONFIG + ".tmp", CONFIG)
+
+
+def restart():
+    """Start Heimdall afresh in this same process, so new settings apply everywhere at once."""
+    print("Settings changed: restarting", flush=True)
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -510,9 +627,16 @@ class Handler(BaseHTTPRequestHandler):
                 # the device list only changes once a minute, so skip it if the page already has this one
                 devs = None if seen_scan == state["last_scan"] else [{**d, "rtt": d["rtt"][-10:]} for d in devices.values()]
                 evs = events[-30:]
-            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "points": sorted(points), "mesh": list(mesh.values()),
+            self.send(json.dumps({"now": time.time(), "series": fresh, "targets": TARGETS, "names": NAMES, "thresholds": THRESHOLDS, "pings_per_check": PINGS_PER_CHECK, "points": sorted(points), "mesh": list(mesh.values()),
                                   "devices": devs, "events": evs, "host": socket.gethostname(), **state},
                                  separators=(",", ":")).encode(), "application/json")
+        elif url.path == "/settings":
+            self.send(json.dumps({
+                "values": {s: {k: conf(s, k) for s2, k in EDITABLE if s2 == s} for s, _ in EDITABLE},
+                "defaults": {s: {k: d for (s2, k), (d, _, _) in EDITABLE.items() if s2 == s} for s, _ in EDITABLE},
+                "limits": {f"{s}.{k}": [lo, hi] for (s, k), (_, lo, hi) in EDITABLE.items()},
+                "alerts": {"url": ALERTS.get("url", ""), "on": sorted(ALERT_ON)}, "all_alerts": ALL_ALERTS,
+                "names": NAMES, "router": ROUTER, "points": sorted(points)}).encode(), "application/json")
         elif url.path == "/speedtest":
             if not state["speed_running"]:
                 threading.Thread(target=speed_test, daemon=True).start()
@@ -520,6 +644,29 @@ class Handler(BaseHTTPRequestHandler):
         else:
             with open(os.path.join(HERE, "index.html"), "rb") as f:
                 self.send(f.read(), "text/html; charset=utf-8")
+
+    def do_POST(self):
+        # Changes need this header, which other websites can't add to a request sent through your browser.
+        if self.headers.get("X-Heimdall") != "1":
+            self.send_response(403)
+            self.end_headers()
+            return
+        try:
+            body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 100_000)) or "{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            err = "That didn't look like settings."
+        elif self.path == "/settings":
+            err = save_settings(body)
+            if not err:
+                threading.Timer(1, restart).start()  # after this reply has gone out
+        elif self.path == "/test-alert":
+            u = str(body.get("url") or ALERTS.get("url") or "")
+            err = send_alert("test alert from the settings page.", u) if re.fullmatch(r"https?://\S{3,500}", u) else "Add an alert address first."
+        else:
+            err = "Unknown request"
+        self.send(json.dumps({"error": err}).encode(), "application/json")
 
 
 if __name__ == "__main__":

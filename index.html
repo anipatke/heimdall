@@ -99,6 +99,26 @@
   .unit { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
   .unit .top { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; margin-bottom: 4px; }
   .unit div { color: var(--text-secondary); }
+  #settings { width: min(680px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 0; border: 1px solid var(--border);
+              border-radius: 10px; background: var(--surface-1); color: var(--text-primary); }
+  #settings::backdrop { background: rgba(0,0,0,.45); }
+  #settings form { padding: 16px; }
+  #settings h2 { font-size: 17px; margin: 0 0 4px; }
+  #settings h3 { margin: 18px 0 6px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .field { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 5px 0; font-size: 13px; }
+  .field .help { grid-column: 1 / -1; color: var(--text-muted); font-size: 12px; margin-top: -2px; }
+  .field .inputs { display: flex; gap: 6px; align-items: center; }
+  .field .inputs label { display: flex; flex-direction: column; font-size: 11px; color: var(--text-muted); }
+  #settings input[type=number] { width: 76px; }
+  #settings input[type=text], #settings input[type=url] { width: 100%; }
+  #settings input { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-0);
+                    border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+  #settings .checks-on { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; padding: 4px 0; }
+  #settings .bar { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+                   margin: 16px -16px -16px; padding: 12px 16px; background: var(--surface-1); border-top: 1px solid var(--border); }
+  #settings .bar .msg { margin-right: auto; font-size: 13px; }
+  .err { color: var(--critical); }
+  @media (max-width: 640px) { .field { grid-template-columns: 1fr; } #settings input[type=number] { width: 64px; } }
 </style>
 </head>
 <body>
@@ -107,7 +127,19 @@
     <h1>Heimdall</h1>
     <span class="sub">watching your home network</span>
     <span class="live" id="live">connecting…</span>
+    <button id="openSettings" aria-haspopup="dialog">⚙ Settings</button>
   </header>
+
+  <dialog id="settings" aria-labelledby="settingsTitle">
+    <form method="dialog" id="settingsForm">
+      <h2 id="settingsTitle">Settings</h2>
+      <p class="muted" style="margin:0;font-size:12px">Leave a box empty to use the default shown in it. Port, address and router are set in heimdall.toml, since a mistake there could lock you out of this page. Anyone on your home network can change these.</p>
+      <div id="settingsBody"><p class="muted">Loading…</p></div>
+      <div class="bar"><span class="msg" id="settingsMsg"></span>
+        <button type="button" id="settingsCancel">Cancel</button>
+        <button type="submit" id="settingsSave" aria-pressed="true">Save and restart</button></div>
+    </form>
+  </dialog>
 
   <section class="card" id="verdict">
     <p class="headline" id="headline">Gathering a minute of readings…</p>
@@ -149,7 +181,7 @@
     <section class="card">
       <h3>How Heimdall is connected</h3>
       <dl class="kv" id="link"></dl>
-      <p style="margin:12px 0 0"><button id="speedbtn"title="Downloads 25 MB, so it briefly uses your whole connection">Run speed test</button> <span id="speed" class="sub"></span></p>
+      <p style="margin:12px 0 0"><button id="speedbtn" title="Downloads a large file, so it briefly uses your whole connection">Run speed test</button> <span id="speed" class="sub"></span></p>
     </section>
     <section class="card">
       <h3>Comings &amp; goings</h3>
@@ -178,7 +210,11 @@ function stats(kind, since) {
   return { n: all.length, med: pct(ok, .5), p95: pct(ok, .95), max: ok.length ? Math.max(...ok) : null,
            loss: all.length ? 100 * (all.length - ok.length) / all.length : null };
 }
-const lossLevel = l => l == null ? "good" : l === 0 ? "good" : l < 2 ? "warning" : l < 5 ? "serious" : "critical";
+// Limits come from heimdall.toml's [thresholds], via the server. [good, fair, poor]: under each is that level.
+const T = () => data.thresholds;
+const limits = ([good, warn, bad]) => ({ good, warn, bad });
+const pointLimits = rt => { const [g, w, b] = T().wifi_point_extra; return { good: rt.good + g, warn: rt.warn + w, bad: rt.bad + b }; };
+const lossLevel = l => { const [g, w, b] = T().loss; return l == null || l <= g ? "good" : l < w ? "warning" : l < b ? "serious" : "critical"; };
 
 // Internet targets come from the server's settings; the first one is "the internet" line.
 const inet = () => Object.keys(data.targets).filter(k => k !== "router");
@@ -190,7 +226,7 @@ function lines() {
 
 function deviceHealth(d) {
   const recent = d.rtt.slice(-5), pinged = recent.filter(r => r[3] >= 0);  // lost -1: present, but ignores pings
-  const sent = pinged.length * 3, lost = pinged.reduce((a, r) => a + r[3], 0);
+  const sent = pinged.length * data.pings_per_check, lost = pinged.reduce((a, r) => a + r[3], 0);
   const missed = sent ? 100 * lost / sent : 0;
   const med = pct(d.rtt.map(r => r[1]).filter(v => v != null), .5);
   const worst = Math.max(...d.rtt.map(r => r[2] ?? 0)) || null;
@@ -199,10 +235,10 @@ function deviceHealth(d) {
   else if (recent.length && !pinged.length) { l = "good"; why = "doesn't answer pings"; }
   else if (pinged.length < 2) l = "good";
   // Nappers skip pings while asleep, so only flag them once a whole run of checks goes unanswered.
-  else if (NAPPERS.has(d.kind) ? missed >= 100 : missed >= 34) { l = "critical"; why = "not answering"; }
-  else if (!NAPPERS.has(d.kind) && missed >= 10) { l = "serious"; why = "missing replies"; }
-  else if (!NAPPERS.has(d.kind) && med > 150) { l = "serious"; why = "slow to answer"; }
-  else if (!NAPPERS.has(d.kind) && med > 60) { l = "warning"; why = "a little slow"; }
+  else if (NAPPERS.has(d.kind) ? missed >= 100 : missed >= T().device_missed[1]) { l = "critical"; why = "not answering"; }
+  else if (!NAPPERS.has(d.kind) && missed >= T().device_missed[0]) { l = "serious"; why = "missing replies"; }
+  else if (!NAPPERS.has(d.kind) && med > T().device[1]) { l = "serious"; why = "slow to answer"; }
+  else if (!NAPPERS.has(d.kind) && med > T().device[0]) { l = "warning"; why = "a little slow"; }
   return { ...d, med, worst, missed, l, why };
 }
 
@@ -211,7 +247,7 @@ function render() {
   const now = Date.now() / 1000, since = now - range, recent = now - 120;
   const link = data.link, onWifi = link?.type === "wifi";
   // Over wifi every reading includes Heimdall's own hop, so the bar for "fine" is higher.
-  const rt = onWifi ? { good: 30, warn: 80, bad: 200 } : { good: 10, warn: 30, bad: 100 };
+  const rt = limits(onWifi ? T().router_wifi : T().router);
   const r = stats("router", recent), [cf, gg = cf] = inet().map(k => stats(k, recent)), dns = stats("dns", now - 300);
   const devs = (data.devices || []).map(deviceHealth);
   const ptStats = (data.points || []).map(ip => ({ ip, st: stats(`point:${ip}`, recent) }));
@@ -228,7 +264,7 @@ function render() {
 
   if (!ptStats.length) areas.push({ name: "Wifi points", who: "Wifi is", l: "good", text: data.last_scan ? "None found; the router does all the wifi." : "Looking for wifi points…" });
   else {
-    const judged = ptStats.map(p => ({ ...p, l: worse(level(p.st.p95, { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(p.st.loss)) }));
+    const judged = ptStats.map(p => ({ ...p, l: worse(level(p.st.p95, pointLimits(rt)), lossLevel(p.st.loss)) }));
     const bad = judged.filter(p => p.l !== "good");
     const fresh = judged.filter(p => restarted(meshBy[p.ip]));
     const restartNote = fresh.map(p => ` ${pointName(p.ip)} restarted ${dur(meshBy[p.ip].uptime)} ago.`).join("");
@@ -245,13 +281,13 @@ function render() {
     : struggling.length ? `${struggling.length} of ${on.length} struggling: ${struggling.slice(0, 4).map(d => `${devName(d)} (${d.why})`).join(", ")}${struggling.length > 4 ? "…" : ""}.`
     : `All ${on.length} answering.` });
 
-  const net = { good: 30, warn: 60, bad: 150 };
+  const net = limits(T().internet);
   const il = worse(level(Math.min(cf.p95 ?? 1e9, gg.p95 ?? 1e9) - (onWifi ? (r.med || 0) : 0), net), lossLevel(Math.min(cf.loss ?? 0, gg.loss ?? 0)));
   const iLoss = Math.min(cf.loss ?? 0, gg.loss ?? 0);
   const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}%`
     : level(cf.med, net) === "good" ? `Spikes to ${fmt(cf.max)} ms`
     : `Slow: ${fmt(cf.med)} ms`;
-  const dl = dns.med != null && dns.med > 150 ? "warning" : "good";
+  const dl = dns.med != null && dns.med > T().lookups ? "warning" : "good";
   areas.push({ name: "Internet", who: "The internet is", l: worse(il, dl), text:
     il !== "good" && rl === "good" ? `${iProblem}. Your home is fine, so it's your provider.`
     : il !== "good" ? `${iProblem}. The router too, so it's inside your home${onWifi ? " (maybe Heimdall's wifi)" : ""}.`
@@ -299,7 +335,7 @@ function renderMesh(meshBy, rt) {
   $("mesh").innerHTML = units.map(ip => {
     const u = meshBy[ip], isRouter = ip === data.targets.router, key = isRouter ? "router" : `point:${ip}`;
     const st = stats(key, Date.now() / 1000 - 300);
-    const l = worse(level(st.p95, isRouter ? rt : { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(st.loss));
+    const l = worse(level(st.p95, isRouter ? rt : pointLimits(rt)), lossLevel(st.loss));
     const lines = [`${fmt(st.med)} ms · ${fmt(st.loss)}% lost`];
     if (u) {
       lines.push(isRouter ? "Main router" : u.wired ? "Wired" : "Wireless");
@@ -337,7 +373,7 @@ function renderDevices(devs) {
                 ip: (a, b) => ipNum(a.ip) - ipNum(b.ip) }[devSort];
   devs.sort(key);
   const bars = d => `<span class="checks" aria-label="last ${d.rtt.length} checks">${d.rtt.map(r =>
-    `<b class="${r[3] < 0 ? "quiet" : r[3] >= 3 ? "miss" : r[3] > 0 ? "part" : ""}"></b>`).join("")}</span>`;
+    `<b class="${r[3] < 0 ? "quiet" : r[3] >= data.pings_per_check ? "miss" : r[3] > 0 ? "part" : ""}"></b>`).join("")}</span>`;
   const row = d => `<tr${d.online ? "" : ' class="off"'}>
       <td>${d.name ? esc(d.name) : "<span class='muted'>(no name)</span>"}<span class="kind">${esc(d.kind)}${d.vendor ? ` · ${esc(d.vendor.replace(/[,.]? *(co\.?,? *ltd|inc|llc|corp(oration)?|gmbh|ltd)\.?$/i, ""))}` : ""}</span></td>
       <td>${d.ip}</td>
@@ -434,6 +470,90 @@ document.querySelectorAll("[data-range]").forEach(b => b.onclick = () => {
   render();
 });
 $("speedbtn").onclick = () => fetch("/speedtest").then(poll);
+
+// Settings: [section, key, label, unit, help, labels for each box when there's more than one]
+const LEVELS = ["Good under", "Fair under", "Poor under"];
+const SETTINGS = [
+  ["How often", [
+    ["checks", "ping_every", "Ping the router, internet and wifi points every", "s"],
+    ["checks", "dns_every", "Time a website lookup every", "s"],
+    ["checks", "mesh_every", "Read each wifi point's status every", "s"],
+    ["checks", "device_every", "Check each device every", "s"],
+    ["checks", "pings_per_check", "Pings per device check", ""],
+    ["checks", "sweep_every", "Look for new devices every", "s", "One ping to every unused address, so keep this gentle."],
+    ["checks", "speedtest_mb", "Speed test download size", "MB"]]],
+  ["What counts as slow", [
+    ["thresholds", "router", "Router, with Heimdall on cable", "ms", "", LEVELS],
+    ["thresholds", "router_wifi", "Router, with Heimdall on wifi", "ms", "Every reading includes Heimdall's own wifi, so allow more.", LEVELS],
+    ["thresholds", "wifi_point_extra", "Extra allowance for wifi points", "ms", "Added to the router's limits above.", ["Good", "Fair", "Poor"]],
+    ["thresholds", "internet", "Internet", "ms", "", LEVELS],
+    ["thresholds", "loss", "Lost replies", "%", "Good means at or under the first number.", ["Good up to", "Fair under", "Poor under"]],
+    ["thresholds", "lookups", "Website lookups are slow over", "ms"],
+    ["thresholds", "device", "A device is slow over", "ms", "Phones and gadgets that nap are never called slow.", ["A little slow", "Slow"]],
+    ["thresholds", "device_missed", "A device is struggling when it misses", "%", "", ["Missing replies", "Not answering"]]]],
+  ["Alerts", [
+    ["alerts", "internet_after", "The internet counts as down after", "s"],
+    ["alerts", "offline_after", "A wifi point counts as offline after", "s"]]],
+  ["Logs", [["logs", "max_mb", "Keep each log up to", "MB", "When full, it becomes .old and a new one starts, so this much again is kept."]]],
+];
+const ALERT_NAMES = { internet: "Internet down", wifi_points: "Wifi point offline", restarts: "Router or point restarted", new_devices: "New device joined" };
+let saved = null;  // what the server sent, to compare against when saving
+
+function numberBox(sec, key, i, value, def, [lo, hi], label) {
+  const box = `<input type="number" step="any" min="${lo}" max="${hi}" data-sec="${sec}" data-key="${key}" data-i="${i}"
+    placeholder="${def}" value="${value === def ? "" : value}" aria-label="${esc(label)}">`;
+  return label ? `<label>${esc(label)}${box}</label>` : box;
+}
+function renderSettings(st) {
+  const field = ([sec, key, label, unit, help, boxes]) => {
+    const v = st.values[sec][key], d = st.defaults[sec][key], lim = st.limits[`${sec}.${key}`];
+    const inputs = Array.isArray(d) ? d.map((x, i) => numberBox(sec, key, i, v[i], x, lim, boxes[i])).join("") : numberBox(sec, key, -1, v, d, lim, "");
+    return `<div class="field"><span>${label}${unit ? ` <span class="muted">(${unit})</span>` : ""}</span><div class="inputs">${inputs}</div>${help ? `<div class="help">${help}</div>` : ""}</div>`;
+  };
+  const units = [st.router, ...st.points];
+  $("settingsBody").innerHTML = SETTINGS.map(([title, fields]) => `<h3>${title}</h3>` + (title === "Alerts" ? `
+      <div class="field" style="grid-template-columns:1fr"><span>Send alerts to <span class="muted">(ntfy topic address, or any web address; {text} is filled in with the message)</span></span>
+        <div class="inputs"><input type="url" id="alertUrl" value="${esc(st.alerts.url)}" placeholder="https://ntfy.sh/your-topic">
+        <button type="button" id="testAlert">Send test</button></div></div>
+      <div class="checks-on">${st.all_alerts.map(a => `<label><input type="checkbox" data-alert="${a}" ${st.alerts.on.includes(a) ? "checked" : ""}> ${ALERT_NAMES[a]}</label>`).join("")}</div>` : "")
+    + fields.map(field).join("")).join("") + `<h3>Names</h3>` + units.map(ip => `<div class="field"><span>${ip === st.router ? "Router" : "Wifi point"} <span class="muted">${ip}</span></span>
+      <div class="inputs"><input type="text" maxlength="40" data-name="${ip}" value="${esc(st.names[ip] || "")}" placeholder="${ip === st.router ? "Router" : `Wifi point .${ip.split(".").pop()}`}"></div></div>`).join("");
+  $("testAlert").onclick = async () => {
+    $("settingsMsg").textContent = "Sending…";
+    const r = await post("/test-alert", { url: $("alertUrl").value.trim() });
+    $("settingsMsg").innerHTML = r.error ? `<span class="err">${esc(r.error)}</span>` : "Sent. Check your phone.";
+  };
+}
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Heimdall": "1" }, body: JSON.stringify(body) });
+    return r.ok ? await r.json() : { error: `Heimdall said no (${r.status})` };
+  } catch { return { error: "Couldn't reach Heimdall" }; }
+}
+$("openSettings").onclick = async () => {
+  $("settingsMsg").textContent = "";
+  $("settings").showModal();
+  try { saved = await (await fetch("/settings")).json(); renderSettings(saved); }
+  catch { $("settingsBody").innerHTML = `<p class="err">Couldn't load settings.</p>`; }
+};
+$("settingsCancel").onclick = () => $("settings").close();
+$("settingsForm").onsubmit = async e => {
+  e.preventDefault();
+  if (!saved) return;
+  const out = { alerts: { url: $("alertUrl").value.trim(), on: [...document.querySelectorAll("[data-alert]:checked")].map(c => c.dataset.alert) }, names: {} };
+  for (const inp of document.querySelectorAll("#settingsBody input[type=number]")) {
+    const { sec, key } = inp.dataset, i = +inp.dataset.i, d = saved.defaults[sec][key];
+    const v = inp.value === "" ? (i < 0 ? d : d[i]) : +inp.value;
+    (out[sec] ||= {});
+    if (i < 0) out[sec][key] = v; else (out[sec][key] ||= [...d])[i] = v;
+  }
+  document.querySelectorAll("[data-name]").forEach(inp => out.names[inp.dataset.name] = inp.value.trim());
+  $("settingsMsg").textContent = "Saving…";
+  const r = await post("/settings", out);
+  if (r.error) return $("settingsMsg").innerHTML = `<span class="err">${esc(r.error)}</span>`;
+  $("settingsMsg").textContent = "Saved. Heimdall is restarting…";
+  setTimeout(() => { $("settings").close(); poll(); }, 3000);
+};
 
 // Only new readings come down each time, so an open page (or a phone) costs almost nothing.
 async function poll() {
