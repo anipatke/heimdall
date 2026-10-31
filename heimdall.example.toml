@@ -1,0 +1,33 @@
+# Heimdall settings. Copy to heimdall.toml and change what you need.
+# Everything here is optional: leave a line out and Heimdall uses the default or works it out.
+# Environment variables PORT, HOST, ROUTER, MDNS_NAME and MDNS_IP override this file.
+
+[server]
+# port = 8765
+# host = "0.0.0.0"                # listen on one address only, e.g. "192.168.1.10"
+# mdns_name = "heimdall.local"    # the name other devices use to find the dashboard; "" turns it off
+# mdns_ip = "192.168.1.10"        # address that name points at (default: this machine's address)
+
+[network]
+# router = "192.168.1.1"          # default: this machine's default route
+# network = "192.168.1.0/24"      # default: the network this machine is on (sweeps cap at 1024 addresses)
+
+[checks]
+# device_every = 60               # seconds between checks of known devices (3 pings each)
+# sweep_every = 600               # seconds between sweeps for new devices (1 ping per address)
+# dns_names = ["google.com", "bbc.co.uk", "github.com"]   # names to time website lookups with
+
+# What "the internet" means. The first one is drawn on the chart.
+# [checks.internet]
+# cloudflare = "1.1.1.1"
+# google = "8.8.8.8"
+
+# Your own naming rules, checked before the built-in ones. "match" is a regular expression
+# tested against the device's network name, case-insensitive.
+# [[kinds]]
+# match = "^living-room"
+# kind = "TV"
+#
+# [[kinds]]
+# match = "kids-"
+# kind = "Tablet"

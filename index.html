@@ -9,7 +9,7 @@
     color-scheme: light;
     --surface-0: #f4f3f0; --surface-1: #fcfcfb; --border: #e3e2dd;
     --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974; --grid: #ebeae6;
-    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4;
     --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
   }
   @media (prefers-color-scheme: dark) {
@@ -17,14 +17,14 @@
       color-scheme: dark;
       --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c;
       --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e88; --grid: #2a2a28;
-      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181;
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c;
     --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e88; --grid: #2a2a28;
-    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--surface-0); color: var(--text-primary);
@@ -33,17 +33,32 @@
   header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
   h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
   .sub { color: var(--text-secondary); }
+  .muted { color: var(--text-muted); }
   .live { margin-left: auto; color: var(--text-muted); font-size: 13px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-  .tile .label { color: var(--text-secondary); font-size: 13px; }
-  .tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 2px 0; }
-  .tile .value small { font-size: 14px; font-weight: 400; color: var(--text-secondary); }
-  .tile .note { font-size: 12px; color: var(--text-muted); }
-  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); }
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
   .status i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .verdict { font-size: 15px; margin-bottom: 16px; }
-  .verdict b { font-weight: 600; }
+  .headline { font-size: 17px; font-weight: 600; margin: 0 0 10px; }
+  .areas { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 20px; }
+  .area .name { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  .area p { margin: 3px 0 0; color: var(--text-secondary); font-size: 13px; }
+  @media (max-width: 640px) {
+    main { padding: 16px 16px 40px; }
+    .card { padding: 12px; }
+    h1 { font-size: 20px; }
+    header .sub { display: none; }
+    .headline { font-size: 16px; }
+    .areas { grid-template-columns: 1fr; gap: 0; }
+    .area { padding: 9px 0; border-top: 1px solid var(--border); }
+    .area:first-child { border-top: 0; padding-top: 0; }
+    .linknote { margin-top: 4px; }
+    .controls h2 { flex-basis: 100%; }
+    svg { height: 200px; }
+    #devices th:nth-child(2), #devices td:nth-child(2), #devices th:nth-child(4), #devices td:nth-child(4) { display: none; }
+    th, td { padding: 7px 5px; }
+    #table th:nth-child(4), #table td:nth-child(4) { display: none; }
+  }
+  .linknote { margin: 12px 0 0; font-size: 13px; color: var(--text-secondary); border-top: 1px solid var(--border); padding-top: 10px; }
   .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
   .controls h2 { font-size: 15px; margin: 0 auto 0 0; }
   button { font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface-1);
@@ -53,19 +68,36 @@
   .legend span::before { content: ""; display: inline-block; width: 14px; height: 2px; vertical-align: middle;
                          margin-right: 6px; background: var(--c); }
   .chartwrap { position: relative; }
-  svg { display: block; width: 100%; height: 300px; }
+  svg { display: block; width: 100%; height: 260px; }
   .tip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
          border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12);
          display: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .tip .sw { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
-  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--border); }
   th:first-child, td:first-child { text-align: left; }
   th { color: var(--text-secondary); font-weight: 500; }
+  td .kind { display: block; font-size: 12px; color: var(--text-muted); }
+  tr.off { opacity: .55; }
+  tr.grp th { text-align: left; padding: 0; background: var(--surface-0); }
+  tr.grp button { all: unset; box-sizing: border-box; width: 100%; padding: 8px; cursor: pointer; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-weight: 600; color: var(--text-primary); }
+  tr.grp button:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+  tr.grp .chev { width: 1em; color: var(--text-muted); }
+  tr.grp .muted, tr.grp .status { font-weight: 400; }
+  .checks { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .checks b { width: 6px; height: 12px; border-radius: 2px; background: var(--good); }
+  .checks b.part { background: var(--warning); }
+  .checks b.miss { background: var(--critical); }
+  .checks b.quiet { background: var(--text-muted); opacity: .5; }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 12px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
   .kv dt { color: var(--text-secondary); } .kv dd { margin: 0; }
   h3 { font-size: 14px; margin: 0 0 8px; }
+  section + section { margin-top: 12px; }
+  .units { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .unit { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+  .unit .top { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+  .unit div { color: var(--text-secondary); }
 </style>
 </head>
 <body>
@@ -76,199 +108,328 @@
     <span class="live" id="live">connecting…</span>
   </header>
 
-  <div class="card verdict" id="verdict">Gathering a minute of readings…</div>
+  <section class="card" id="verdict">
+    <p class="headline" id="headline">Gathering a minute of readings…</p>
+    <div class="areas" id="areas"></div>
+    <p class="linknote" id="linknote" hidden></p>
+  </section>
 
-  <div class="tiles" id="tiles"></div>
+  <section class="card">
+    <h3>Wifi mesh</h3>
+    <div class="units" id="mesh"><span class="muted">Reading the router and wifi points…</span></div>
+    <p class="muted" id="meshnote" style="margin:8px 0 0;font-size:12px" hidden></p>
+  </section>
 
   <section class="card">
     <div class="controls">
-      <h2>Response time (ms) — lower is better</h2>
+      <h2 id="devtitle">Devices</h2>
+      <button id="openall">Open all</button>
+      <button id="closeall">Close all</button>
+      <button data-sort="health" aria-pressed="true">Struggling first</button>
+      <button data-sort="name">By name</button>
+      <button data-sort="ip">By address</button>
+    </div>
+    <p class="sub" style="margin:0 0 8px">Each device is checked once a minute with three quick pings. The bars show the last ten checks:
+      green answered every ping, amber missed some, red missed them all, grey means it's there but ignores pings (common for Windows laptops, consoles and TVs). Phones, tablets and gadgets nap to save battery,
+      so they're only flagged when they stop answering, not for being slow.</p>
+    <div style="overflow-x:auto"><table id="devices"></table></div>
+  </section>
+
+  <section class="card">
+    <div class="controls">
+      <h2>Response time (ms), lower is better</h2>
       <button data-range="300">5 min</button>
       <button data-range="900" aria-pressed="true">15 min</button>
       <button data-range="3600">1 hour</button>
     </div>
     <div class="legend" id="legend"></div>
-    <div class="chartwrap"><svg id="chart" role="img" aria-label="Response time over time"></svg><div class="tip" id="tip"></div></div>
+    <div class="chartwrap"><svg id="chart" role="img" aria-label="Response time of the router, wifi points and internet over time"></svg><div class="tip" id="tip"></div></div>
+    <table id="table" style="margin-top:12px"></table>
   </section>
 
   <div class="grid2">
     <section class="card">
-      <h3>Summary for selected range</h3>
-      <table id="table"></table>
-    </section>
-    <section class="card">
-      <h3>This computer's wifi &amp; speed</h3>
-      <dl class="kv" id="wifi"></dl>
+      <h3>How Heimdall is connected</h3>
+      <dl class="kv" id="link"></dl>
       <p><button id="speedbtn">Run speed test</button> <span id="speed" class="sub"></span></p>
+      <p class="muted" style="margin:0;font-size:12px">The speed test downloads 25 MB, so it briefly uses your whole connection. It only runs when you press the button.</p>
     </section>
-  </div>
-
-  <section class="card" style="margin-top:12px">
-    <div class="controls">
-      <h2 id="devtitle">Devices</h2>
-      <button data-sort="rtt" aria-pressed="true">Slowest first</button>
-      <button data-sort="name">By name</button>
-      <button data-sort="ip">By address</button>
-    </div>
-    <p class="sub" style="margin:0 0 8px">Checked every minute. "Response" is how long each device takes to answer — on wifi devices, slow or jumpy numbers mean a weak signal or a struggling wifi point. Phones and tablets nap to save battery, so they often look slow when idle; judge them while in use.</p>
-    <div style="overflow-x:auto"><table id="devices"></table></div>
-  </section>
-
-  <div class="grid2">
     <section class="card">
       <h3>Comings &amp; goings</h3>
-      <div id="events" class="sub">Nothing yet — devices joining or leaving will appear here.</div>
-    </section>
-    <section class="card">
-      <h3>What Heimdall can and can't see</h3>
-      <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses — your router keeps that to itself. For per-device data use, open the Google Home app → Wifi → Devices.</p>
+      <div id="events" class="sub">Nothing yet. Devices joining or leaving will appear here.</div>
     </section>
   </div>
+  <section class="card" style="margin-top:12px">
+    <h3>What Heimdall can and can't see</h3>
+    <p class="sub" style="margin:0">It sees which devices are switched on, when they join or leave, and how quickly each one answers. It can't see what websites they visit or how much data each uses, because your router keeps that to itself. For per-device data use, check your router's own app.</p>
+  </section>
 </main>
 <script>
-const SERIES = [
-  { key: "router", name: "Your router", css: "--series-1", good: 10, warn: 30, bad: 100 },
-  { key: "cloudflare", name: "Internet (Cloudflare)", css: "--series-2", good: 30, warn: 60, bad: 150 },
-  { key: "google", name: "Internet (Google)", css: "--series-3", good: 30, warn: 60, bad: 150 },
-];
-const STATUS = { good: ["--good", "Good"], warning: ["--warning", "Fair"], serious: ["--serious", "Poor"], critical: ["--critical", "Bad"] };
-let range = 900, data = null;
+const STATUS = { good: ["--good", "Good"], warning: ["--warning", "Fair"], serious: ["--serious", "Poor"], critical: ["--critical", "Bad"], off: ["--text-muted", "Offline"] };
+const RANK = { critical: 0, serious: 1, warning: 2, good: 3, off: 4 };
+const NAPPERS = new Set(["Phone", "Tablet", "Smart-home gadget", "Smart speaker", "Appliance", "Printer", "Unknown"]);
+let range = 900, data = null, series = {}, lastNow = 0;
 const $ = id => document.getElementById(id);
-const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const pct = (arr, p) => { if (!arr.length) return null; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
 const fmt = v => v == null ? "–" : v < 10 ? v.toFixed(1) : Math.round(v);
 const level = (v, t) => v == null ? "critical" : v < t.good ? "good" : v < t.warn ? "warning" : v < t.bad ? "serious" : "critical";
+const worse = (...ls) => ls.reduce((a, b) => RANK[b] < RANK[a] ? b : a, "good");
 const badge = l => `<span class="status"><i style="background:var(${STATUS[l][0]})"></i>${STATUS[l][1]}</span>`;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pointName = ip => `Wifi point .${ip.split(".").pop()}`;
+const devName = d => d.name ? esc(d.name) : `<span class="muted">${d.ip}</span>`;
 
 function stats(kind, since) {
-  const all = data.samples.filter(s => s.k === kind && s.t >= since);
-  const ok = all.filter(s => s.v != null).map(s => s.v);
-  return { n: all.length, ok, med: pct(ok, .5), p95: pct(ok, .95), max: ok.length ? Math.max(...ok) : null,
+  const all = (series[kind] || []).filter(s => s[0] >= since);
+  const ok = all.filter(s => s[1] != null).map(s => s[1]);
+  return { n: all.length, med: pct(ok, .5), p95: pct(ok, .95), max: ok.length ? Math.max(...ok) : null,
            loss: all.length ? 100 * (all.length - ok.length) / all.length : null };
+}
+const lossLevel = l => l == null ? "good" : l === 0 ? "good" : l < 2 ? "warning" : l < 5 ? "serious" : "critical";
+
+// Internet targets come from the server's settings; the first one is "the internet" line.
+const inet = () => Object.keys(data.targets).filter(k => k !== "router");
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+// Chart lines: router, internet, then each wifi point. Colour follows the thing, not its position in a list.
+function lines() {
+  return [{ key: "router", name: "Router", css: "--series-1" }, { key: inet()[0], name: "Internet", css: "--series-2" },
+          ...(data.points || []).slice(0, 3).map((ip, i) => ({ key: `point:${ip}`, name: pointName(ip), css: `--series-${3 + i}` }))];
+}
+
+function deviceHealth(d) {
+  const recent = d.rtt.slice(-5), pinged = recent.filter(r => r[3] >= 0);  // lost -1: present, but ignores pings
+  const sent = pinged.length * 3, lost = pinged.reduce((a, r) => a + r[3], 0);
+  const missed = sent ? 100 * lost / sent : 0;
+  const med = pct(d.rtt.map(r => r[1]).filter(v => v != null), .5);
+  const worst = Math.max(...d.rtt.map(r => r[2] ?? 0)) || null;
+  let l = "good", why = "";
+  if (!d.online) l = "off";
+  else if (recent.length && !pinged.length) { l = "good"; why = "doesn't answer pings"; }
+  else if (pinged.length < 2) l = "good";
+  // Nappers skip pings while asleep, so only flag them once a whole run of checks goes unanswered.
+  else if (NAPPERS.has(d.kind) ? missed >= 100 : missed >= 34) { l = "critical"; why = "not answering"; }
+  else if (!NAPPERS.has(d.kind) && missed >= 10) { l = "serious"; why = "missing replies"; }
+  else if (!NAPPERS.has(d.kind) && med > 150) { l = "serious"; why = "slow to answer"; }
+  else if (!NAPPERS.has(d.kind) && med > 60) { l = "warning"; why = "a little slow"; }
+  return { ...d, med, worst, missed, l, why };
 }
 
 function render() {
   if (!data) return;
-  const now = Date.now() / 1000, since = now - range, recent = now - 60;
-  const r = Object.fromEntries(SERIES.map(s => [s.key, stats(s.key, recent)]));
-  const dns = stats("dns", now - 300);
-  const lossAll = SERIES.reduce((a, s) => a + (r[s.key].loss || 0), 0) / SERIES.length;
-  const jitter = r.router.p95 != null ? r.router.p95 - r.router.med : null;
+  const now = Date.now() / 1000, since = now - range, recent = now - 120;
+  const link = data.link, onWifi = link?.type === "wifi";
+  // Over wifi every reading includes Heimdall's own hop, so the bar for "fine" is higher.
+  const rt = onWifi ? { good: 30, warn: 80, bad: 200 } : { good: 10, warn: 30, bad: 100 };
+  const r = stats("router", recent), [cf, gg = cf] = inet().map(k => stats(k, recent)), first = cap(inet()[0]), dns = stats("dns", now - 300);
+  const devs = (data.devices || []).map(deviceHealth);
+  const ptStats = (data.points || []).map(ip => ({ ip, st: stats(`point:${ip}`, recent) }));
 
-  const tiles = [
-    { label: "Router (last minute)", v: r.router.med, unit: "ms", note: `worst ${fmt(r.router.max)} ms`, l: level(r.router.p95, SERIES[0]) },
-    { label: "Internet (last minute)", v: r.cloudflare.med, unit: "ms", note: `worst ${fmt(r.cloudflare.max)} ms`, l: level(r.cloudflare.p95, SERIES[1]) },
-    { label: "Website lookups", v: dns.med, unit: "ms", note: "name lookups, last 5 min", l: level(dns.p95, { good: 50, warn: 150, bad: 500 }) },
-    { label: "Lost replies", v: lossAll, unit: "%", note: "last minute", l: lossAll === 0 ? "good" : lossAll < 2 ? "warning" : lossAll < 5 ? "serious" : "critical" },
-    { label: "Wobble at router", v: jitter, unit: "ms", note: "spikes above normal", l: level(jitter, { good: 5, warn: 20, bad: 60 }) },
-  ];
-  $("tiles").innerHTML = tiles.map(t => `<div class="card tile"><div class="label">${t.label}</div>
-    <div class="value">${fmt(t.v)} <small>${t.unit}</small></div>${badge(t.l)} <span class="note">${t.note}</span></div>`).join("");
+  const areas = [];
+  const meshBy = Object.fromEntries((data.mesh || []).map(u => [u.ip, u]));
+  const rl = meshBy[data.targets.router]?.online === false ? "critical" : worse(level(r.p95, rt), lossLevel(r.loss));
+  areas.push({ name: "Router", who: "The router is", l: rl, text:
+    meshBy[data.targets.router]?.online === false ? "The router says it has lost its internet connection. Check the cable to your modem."
+    : rl === "good" ? `Answering quickly, ${fmt(r.med)} ms typical.`
+    : r.loss >= 2 ? `Dropping ${fmt(r.loss)}% of replies. If this lasts, restart it.`
+    : level(r.med, rt) === "good" ? `Mostly quick (${fmt(r.med)} ms typical) but spiking up to ${fmt(r.max)} ms.${onWifi ? " Heimdall's own weak wifi can cause spikes like this." : ""}`
+    : `Slow to answer: ${fmt(r.med)} ms typical, spikes to ${fmt(r.max)} ms. A busy or overheated router does this.` });
 
-  // Plain-English verdict
-  let msg;
-  if (r.router.n < 20) msg = "Gathering a minute of readings…";
-  else if (lossAll >= 2) msg = "<b>Replies are going missing.</b> Something between you and the router is dropping traffic — check cables or move closer to the router.";
-  else if (level(r.router.p95, SERIES[0]) !== "good") msg = "<b>Your router is slow to answer.</b> The problem is inside your home: a busy or overheated router, or a weak link to a mesh point. Try restarting the router.";
-  else if (level(r.cloudflare.p95, SERIES[1]) !== "good") msg = "<b>Your home network is fine, but the internet beyond it is slow.</b> That points at your internet provider.";
-  else if (dns.med != null && dns.med > 150) msg = "<b>Website name lookups are slow.</b> Pages will feel sluggish to start loading. Try switching the router to Cloudflare (1.1.1.1) or Google (8.8.8.8) lookups.";
-  else msg = "<b>All clear from this computer.</b> If another device still lags, the problem is that device's wifi signal — try it near the router.";
-  $("verdict").innerHTML = msg;
+  if (!ptStats.length) areas.push({ name: "Wifi points", who: "Wifi is", l: "good", text: data.last_scan ? "No separate wifi points found, so the router does all the wifi." : "Looking for wifi points…" });
+  else {
+    const judged = ptStats.map(p => ({ ...p, l: worse(level(p.st.p95, { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(p.st.loss)) }));
+    const bad = judged.filter(p => p.l !== "good");
+    const fresh = judged.filter(p => restarted(meshBy[p.ip]));
+    const restartNote = fresh.map(p => ` ${pointName(p.ip)} restarted ${Math.round(meshBy[p.ip].uptime / 60)} min ago.`).join("");
+    areas.push({ name: `Wifi points (${judged.length})`, who: bad.length === 1 ? `${pointName(bad[0].ip)} is` : "The wifi points are", l: worse(...judged.map(p => p.l), fresh.length ? "warning" : "good"), text: (!bad.length
+      ? `${judged.length === 1 ? "It's" : `All ${judged.length} are`} answering well (${judged.map(p => fmt(p.st.med) + " ms").join(", ")}).`
+      : bad.every(p => p.st.loss < 2 && level(p.st.med, rt) === "good")
+        ? bad.map(p => `${pointName(p.ip)} is mostly quick (${fmt(p.st.med)} ms) but spiking up to ${fmt(p.st.max)} ms`).join("; ") + "."
+        : bad.map(p => `${pointName(p.ip)} is ${p.st.loss >= 2 ? `dropping ${fmt(p.st.loss)}% of replies` : `slow (${fmt(p.st.med)} ms typical)`}`).join("; ") +
+          ". It may be too far from the router or another point. Try moving it closer.") + restartNote });
+  }
 
+  const on = devs.filter(d => d.online), struggling = on.filter(d => RANK[d.l] <= 1);
+  areas.push({ name: "Devices", who: struggling.length === 1 ? `${devName(struggling[0])} is` : "Some devices are", l: !data.last_scan ? "good" : struggling.length ? (struggling.length > 2 ? "serious" : "warning") : "good", text:
+    !data.last_scan ? "First check running…"
+    : struggling.length ? `${struggling.length} of ${on.length} struggling: ${struggling.slice(0, 4).map(d => `${devName(d)} (${d.why})`).join(", ")}${struggling.length > 4 ? "…" : ""}.`
+    : `All ${on.length} switched-on devices are answering normally.` });
+
+  const net = { good: 30, warn: 60, bad: 150 };
+  const il = worse(level(Math.min(cf.p95 ?? 1e9, gg.p95 ?? 1e9) - (onWifi ? (r.med || 0) : 0), net), lossLevel(Math.min(cf.loss ?? 0, gg.loss ?? 0)));
+  const iLoss = Math.min(cf.loss ?? 0, gg.loss ?? 0);
+  const iProblem = iLoss >= 2 ? `Dropping ${fmt(iLoss)}% of replies`
+    : level(cf.med, net) === "good" ? `Mostly fast (${fmt(cf.med)} ms to ${first}) but with spikes up to ${fmt(cf.max)} ms`
+    : `Slow: ${fmt(cf.med)} ms to ${first}`;
+  const dl = dns.med != null && dns.med > 150 ? "warning" : "good";
+  areas.push({ name: "Internet", who: "The internet is", l: worse(il, dl), text:
+    il !== "good" && rl === "good" ? `${iProblem}. Your home network is steady, so this is beyond your home, at your internet provider.`
+    : il !== "good" ? `${iProblem}. The router shows it too, so the trouble starts inside your home${onWifi ? ", possibly Heimdall's own wifi" : ""}.`
+    : dl !== "good" ? `Fast, but website lookups are slow (${fmt(dns.med)} ms), so pages are slow to start loading. Try switching your router to a public lookup service such as 1.1.1.1.`
+    : `Fast: ${fmt(cf.med)} ms to ${first}, website lookups ${fmt(dns.med)} ms.` });
+
+  const overall = worse(...areas.map(a => a.l));
+  const top = areas.filter(a => a.l === overall)[0];
+  $("headline").textContent = r.n < 20 ? "Gathering a minute of readings…"
+    : overall === "good" ? "All clear across your network."
+    : overall === "warning" ? `Mostly fine. ${top.who} a little shaky.`
+    : `${top.who} struggling.`;
+  $("areas").innerHTML = areas.map(a => `<div class="area"><div class="name">${a.name} ${badge(a.l)}</div><p>${a.text}</p></div>`).join("");
+
+  const ln = $("linknote");
+  if (onWifi) {
+    const s = link.signal_dbm, word = s == null ? "unknown" : s > -60 ? "strong" : s > -70 ? "OK" : "weak";
+    ln.hidden = false;
+    ln.textContent = `Heimdall is on ${word} wifi (${s ?? "?"} dBm), so its readings run ${word === "weak" ? "high and spiky" : "a little high"}. A cable to the router would sharpen them.`;
+  } else ln.hidden = !link ? (ln.textContent = "", true) : (ln.textContent = "Heimdall is plugged in by cable, so these readings show your network, not Heimdall's own wifi.", false);
+
+  renderMesh(meshBy, rt);
+  renderDevices(devs);
   drawChart(since, now);
-
-  const rows = SERIES.map(s => ({ s, st: stats(s.key, since) }));
+  const rows = lines().map(s => ({ s, st: stats(s.key, since) }));
   const dr = stats("dns", since);
-  $("table").innerHTML = `<tr><th>Target</th><th>Typical</th><th>Slow (95%)</th><th>Worst</th><th>Lost</th></tr>` +
+  $("table").innerHTML = `<tr><th>For the selected range</th><th>Typical</th><th>Slow (95%)</th><th>Worst</th><th>Lost</th></tr>` +
     rows.map(({ s, st }) => `<tr><td>${s.name}</td><td>${fmt(st.med)} ms</td><td>${fmt(st.p95)} ms</td><td>${fmt(st.max)} ms</td><td>${fmt(st.loss)}%</td></tr>`).join("") +
     `<tr><td>Website lookups</td><td>${fmt(dr.med)} ms</td><td>${fmt(dr.p95)} ms</td><td>${fmt(dr.max)} ms</td><td>${fmt(dr.loss)}%</td></tr>`;
 
-  const w = data.wifi;
-  const kv = !w ? [["Wifi", "unavailable"]]
-    : w.State === "connected" ? [["Network", w.SSID], ["Signal", w.Signal], ["Band", w.Band], ["Channel", w.Channel], ["Type", w["Radio type"]], ["Link speed", `${w["Receive rate (Mbps)"]} / ${w["Transmit rate (Mbps)"]} Mbps`]]
-    : [["Wifi", `${w.State || "off"} — this computer is on a cable, so these readings show the router and internet, not wifi`]];
-  $("wifi").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${v ?? "–"}</dd>`).join("");
+  const kv = !link ? [["Connection", "unknown"]]
+    : onWifi ? [["Connection", "Wifi"], ["Network", esc(link.ssid)], ["Signal", link.signal_dbm != null ? `${link.signal_dbm} dBm` : null], ["Band", link.band],
+                ["Link speed", `${fmt(link.rx_mbps)} down / ${fmt(link.tx_mbps)} up Mbps`]]
+    : [["Connection", "Cable"], ["Link speed", link.speed_mbps ? `${link.speed_mbps} Mbps` : null]];
+  $("link").innerHTML = kv.map(([k, v]) => `<dt>${k}</dt><dd>${v ?? "–"}</dd>`).join("");
   const sp = data.speed;
   $("speed").textContent = data.speed_running ? "testing…" : sp?.mbps ? `${sp.mbps} Mbps download at ${new Date(sp.at * 1000).toLocaleTimeString()}` : sp?.error ? "test failed" : "";
   $("speedbtn").disabled = data.speed_running;
-  renderDevices();
 }
 
-let devSort = "rtt";
+const restarted = u => u && u.uptime != null && u.uptime < 3600;
+const dur = s => s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} hours` : `${Math.round(s / 86400)} days`;
+function renderMesh(meshBy, rt) {
+  const units = [data.targets.router, ...(data.points || [])];
+  $("mesh").innerHTML = units.map(ip => {
+    const u = meshBy[ip], isRouter = ip === data.targets.router, key = isRouter ? "router" : `point:${ip}`;
+    const st = stats(key, Date.now() / 1000 - 300);
+    const l = worse(level(st.p95, isRouter ? rt : { good: rt.good + 20, warn: rt.warn + 40, bad: rt.bad + 100 }), lossLevel(st.loss));
+    const lines = [`${fmt(st.med)} ms typical, ${fmt(st.loss)}% lost (last 5 min)`];
+    if (u) {
+      lines.push(isRouter ? "Main router" : u.wired ? "Joined to the mesh by cable" : "Joined to the mesh over wifi");
+      if (u.uptime != null) lines.push(restarted(u) ? `<b>Restarted ${dur(u.uptime)} ago</b>` : `Up ${dur(u.uptime)}`);
+      if (u.update) lines.push("Installing a software update");
+      if (isRouter && u.online === false) lines.push("<b>Says it's offline from the internet</b>");
+    } else lines.push("No status page, so pings only");
+    return `<div class="unit"><div class="top"><span>${isRouter ? "Router" : pointName(ip)}</span>${badge(l)}</div>${lines.map(x => `<div>${x}</div>`).join("")}</div>`;
+  }).join("");
+  const root = meshBy[data.targets.router];
+  const note = $("meshnote");
+  note.hidden = !root?.upstream;
+  if (root?.upstream) note.textContent = `Your router reaches the internet through another router at ${root.upstream} (probably your internet provider's modem). Two routers in a row is usually fine, but it can upset some games and video calls.`;
+}
+
+let devSort = "health";
+const GROUPS = [["Network", ["Router", "Wifi point", "Heimdall (this machine)"]], ["Computers", ["Computer"]], ["TVs", ["TV"]],
+                ["Speakers", ["Sonos speaker", "Smart speaker"]], ["Phones & tablets", ["Phone", "Tablet"]],
+                ["Smart-home gadgets", ["Smart-home gadget"]], ["Appliances", ["Appliance"]], ["Printers", ["Printer"]], ["Unknown", ["Unknown"]]];
+let openGroups = {};  // group name -> open?; unset groups open only when something in them is struggling
+try { openGroups = JSON.parse(localStorage.getItem("heimdall.groups")) || {}; } catch {}
+$("devices").addEventListener("click", e => {
+  const b = e.target.closest("[data-group]");
+  if (!b) return;
+  openGroups[b.dataset.group] = b.getAttribute("aria-expanded") !== "true";
+  try { localStorage.setItem("heimdall.groups", JSON.stringify(openGroups)); } catch {}
+  render();
+});
 const ipNum = ip => ip.split(".").reduce((a, b) => a * 256 + +b, 0);
 const ago = t => { const s = Date.now() / 1000 - t; return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
-function renderDevices() {
-  const devs = (data.devices || []).map(d => {
-    const a = d.rtt.map(r => r[1]), mx = d.rtt.map(r => r[2]);
-    return { ...d, med: pct(a, .5), worst: mx.length ? Math.max(...mx) : null };
-  });
-  const online = devs.filter(d => d.online).length;
-  $("devtitle").textContent = data.last_scan ? `Devices — ${online} switched on` : "Devices — first scan running…";
-  const key = { rtt: (a, b) => b.online - a.online || (b.med ?? -1) - (a.med ?? -1),
+function renderDevices(devs) {
+  $("devtitle").textContent = data.last_scan ? `Devices: ${devs.filter(d => d.online).length} switched on` : "Devices: first check running…";
+  const key = { health: (a, b) => RANK[a.l] - RANK[b.l] || (b.missed - a.missed) || (b.med ?? -1) - (a.med ?? -1),
                 name: (a, b) => (a.name || "~").localeCompare(b.name || "~"),
                 ip: (a, b) => ipNum(a.ip) - ipNum(b.ip) }[devSort];
   devs.sort(key);
-  const t = { good: 15, warn: 50, bad: 150 };
-  $("devices").innerHTML = `<tr><th>Device</th><th>Type</th><th>Address</th><th>Response (typical)</th><th>Worst</th><th>Seen</th></tr>` +
-    devs.map(d => `<tr${d.online ? "" : ' style="opacity:.55"'}>
-      <td>${d.name || "<span class='sub'>(no name)</span>"}</td>
-      <td>${d.kind}</td><td>${d.ip}</td>
-      <td>${d.online ? `${fmt(d.med)} ms ${badge(level(d.med, t))}` : "offline"}</td>
-      <td>${fmt(d.worst)} ms</td><td>${d.online ? "online" : "left " + ago(d.last)}</td></tr>`).join("");
-  const ev = (data.events || []).slice(-30).reverse();
+  const bars = d => `<span class="checks" aria-label="last ${d.rtt.length} checks">${d.rtt.map(r =>
+    `<b class="${r[3] < 0 ? "quiet" : r[3] >= 3 ? "miss" : r[3] > 0 ? "part" : ""}"></b>`).join("")}</span>`;
+  const row = d => `<tr${d.online ? "" : ' class="off"'}>
+      <td>${d.name ? esc(d.name) : "<span class='muted'>(no name)</span>"}<span class="kind">${esc(d.kind)}${d.vendor ? ` · ${esc(d.vendor.replace(/[,.]? *(co\.?,? *ltd|inc|llc|corp(oration)?|gmbh|ltd)\.?$/i, ""))}` : ""}</span></td>
+      <td>${d.ip}</td>
+      <td>${d.online && d.med != null ? fmt(d.med) + " ms" : "–"}</td>
+      <td>${d.worst != null ? fmt(d.worst) + " ms" : "–"}</td>
+      <td>${bars(d)}</td>
+      <td>${d.online ? badge(d.l) + (d.why ? ` <span class="muted">${d.why}</span>` : "") : `<span class="muted">left ${ago(d.last)}</span>`}</td></tr>`;
+  const groups = GROUPS.map(([name, kinds]) => ({ name, devs: devs.filter(d => kinds.includes(d.kind)) }))
+    .concat([{ name: "Other", devs: devs.filter(d => !GROUPS.some(([, k]) => k.includes(d.kind))) }]).filter(g => g.devs.length);
+  $("devices").innerHTML = `<thead><tr><th>Device</th><th>Address</th><th>Typical</th><th>Worst</th><th>Last checks</th><th>Health</th></tr></thead>` +
+    groups.map(g => {
+      const on = g.devs.filter(d => d.online).length, bad = g.devs.filter(d => d.online && RANK[d.l] <= 1);
+      const open = g.name in openGroups ? openGroups[g.name] : g.name === "Network" || bad.length > 0;
+      return `<tbody><tr class="grp"><th colspan="6"><button data-group="${g.name}" aria-expanded="${open}">
+        <span class="chev">${open ? "▾" : "▸"}</span> ${g.name} <span class="muted">${on} on${g.devs.length > on ? `, ${g.devs.length - on} off` : ""}</span>
+        ${bad.length ? badge(worse(...bad.map(d => d.l))) + ` <span class="muted">${bad.length} struggling</span>` : ""}</button></th></tr>
+        ${open ? g.devs.map(row).join("") : ""}</tbody>`;
+    }).join("");
+  const ev = (data.events || []).slice().reverse();
   if (ev.length) $("events").innerHTML = ev.map(e =>
-    `<div>${new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} — <b>${e.name || e.ip}</b> ${e.what}</div>`).join("");
+    `<div>${new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: <b>${esc(e.name || e.ip)}</b> ${e.what}</div>`).join("");
 }
+const setAll = open => { GROUPS.concat([["Other"]]).forEach(([n]) => openGroups[n] = open);
+  try { localStorage.setItem("heimdall.groups", JSON.stringify(openGroups)); } catch {} render(); };
+$("openall").onclick = () => setAll(true);
+$("closeall").onclick = () => setAll(false);
 document.querySelectorAll("[data-sort]").forEach(b => b.onclick = () => {
   devSort = b.dataset.sort;
   document.querySelectorAll("[data-sort]").forEach(o => o.setAttribute("aria-pressed", o === b));
-  renderDevices();
+  render();
 });
 
 let geom = null;
 function drawChart(since, now) {
-  const svg = $("chart"), W = svg.clientWidth, H = 300, m = { l: 44, r: 12, t: 10, b: 26 };
-  const pts = SERIES.map(s => data.samples.filter(p => p.k === s.key && p.t >= since));
-  const vals = pts.flat().map(p => p.v).filter(v => v != null);
-  const ymax = Math.max(20, Math.ceil(Math.max(...vals, 0) * 1.1 / 10) * 10);
+  const svg = $("chart"), W = svg.clientWidth, H = svg.clientHeight || 260, m = { l: 40, r: 92, t: 10, b: 26 };
+  const ls = lines(), pts = ls.map(s => (series[s.key] || []).filter(p => p[0] >= since));
+  const vals = pts.flat().map(p => p[1]).filter(v => v != null);
+  // Scale to the normal range; rare huge spikes are pinned to the top edge instead of flattening everything.
+  const ymax = Math.max(20, Math.ceil((pct(vals, .99) ?? 0) * 1.2 / 10) * 10);
   const x = t => m.l + (t - since) / (now - since) * (W - m.l - m.r);
-  const y = v => m.t + (1 - v / ymax) * (H - m.t - m.b);
+  const y = v => m.t + (1 - Math.min(v, ymax) / ymax) * (H - m.t - m.b);
   let g = "";
-  const step = ymax / 4;
   for (let i = 0; i <= 4; i++) {
-    const v = step * i;
+    const v = ymax / 4 * i;
     g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/>`;
     g += `<text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${Math.round(v)}</text>`;
   }
   const tickEvery = range <= 300 ? 60 : range <= 900 ? 180 : 600;
   for (let t = Math.ceil(since / tickEvery) * tickEvery; t <= now; t += tickEvery)
     g += `<text x="${x(t)}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</text>`;
-  // Lines (gaps where a reply was lost), lost replies marked on the baseline
-  SERIES.forEach((s, i) => {
-    let d = "", pen = false;
-    for (const p of pts[i]) {
-      if (p.v == null) { pen = false; g += `<line x1="${x(p.t)}" x2="${x(p.t)}" y1="${y(0)}" y2="${y(0) - 8}" stroke="var(--critical)" stroke-width="2"/>`; continue; }
-      d += `${pen ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`; pen = true;
+  const ends = [];
+  ls.forEach((s, i) => {
+    let d = "", pen = false, last = null;
+    for (const [t, v] of pts[i]) {
+      if (v == null) { pen = false; g += `<line x1="${x(t)}" x2="${x(t)}" y1="${y(0)}" y2="${y(0) - 8}" stroke="var(--critical)" stroke-width="2"/>`; continue; }
+      d += `${pen ? "L" : "M"}${x(t).toFixed(1)},${y(v).toFixed(1)}`; pen = true; last = v;
     }
     g += `<path d="${d}" fill="none" stroke="var(${s.css})" stroke-width="2" stroke-linejoin="round"/>`;
+    if (last != null) ends.push({ s, y: y(last) });
   });
+  // Name each line at its right end, nudged apart so labels never overlap.
+  ends.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+  ends.forEach(e => g += `<text x="${W - m.r + 6}" y="${e.y + 4}" font-size="11" fill="var(--text-secondary)">${e.s.name}</text>`);
   g += `<line id="cross" y1="${m.t}" y2="${H - m.b}" stroke="var(--text-muted)" stroke-dasharray="3 3" visibility="hidden"/>`;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = g;
-  geom = { since, now, m, W, pts };
+  geom = { since, now, m, W, pts, ls };
+  $("legend").innerHTML = ls.map(s => `<span style="--c:var(${s.css})">${s.name}</span>`).join("") +
+    `<span style="--c:var(--critical)">Lost reply (red tick)</span>`;
 }
 
 const chartwrap = document.querySelector(".chartwrap");
 chartwrap.addEventListener("mousemove", e => {
   if (!geom) return;
-  const { since, now, m, W, pts } = geom, rect = chartwrap.getBoundingClientRect(), px = e.clientX - rect.left;
+  const { since, now, m, W, pts, ls } = geom, rect = chartwrap.getBoundingClientRect(), px = e.clientX - rect.left;
   if (px < m.l || px > W - m.r) return hideTip();
   const t = since + (px - m.l) / (W - m.l - m.r) * (now - since);
-  const near = pts.map(arr => arr.reduce((b, p) => !b || Math.abs(p.t - t) < Math.abs(b.t - t) ? p : b, null));
+  const near = pts.map(arr => arr.reduce((b, p) => !b || Math.abs(p[0] - t) < Math.abs(b[0] - t) ? p : b, null));
   const cross = document.getElementById("cross"); cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.setAttribute("visibility", "visible");
   const tip = $("tip");
   tip.innerHTML = `<div style="color:var(--text-secondary)">${new Date(t * 1000).toLocaleTimeString()}</div>` +
-    SERIES.map((s, i) => `<div><span class="sw" style="background:var(${s.css})"></span>${s.name}: <b>${near[i]?.v == null ? "lost" : fmt(near[i].v) + " ms"}</b></div>`).join("");
+    ls.map((s, i) => `<div><span class="sw" style="background:var(${s.css})"></span>${s.name}: <b>${!near[i] ? "–" : near[i][1] == null ? "lost" : fmt(near[i][1]) + " ms"}</b></div>`).join("");
   tip.style.display = "block";
   tip.style.left = Math.min(px + 12, rect.width - tip.offsetWidth - 4) + "px";
   tip.style.top = "8px";
@@ -276,8 +437,6 @@ chartwrap.addEventListener("mousemove", e => {
 const hideTip = () => { $("tip").style.display = "none"; document.getElementById("cross")?.setAttribute("visibility", "hidden"); };
 chartwrap.addEventListener("mouseleave", hideTip);
 
-$("legend").innerHTML = SERIES.map(s => `<span style="--c:var(${s.css})">${s.name}</span>`).join("") +
-  `<span style="--c:var(--critical)">Lost reply (red tick)</span>`;
 document.querySelectorAll("[data-range]").forEach(b => b.onclick = () => {
   range = +b.dataset.range;
   document.querySelectorAll("[data-range]").forEach(o => o.setAttribute("aria-pressed", o === b));
@@ -285,14 +444,25 @@ document.querySelectorAll("[data-range]").forEach(b => b.onclick = () => {
 });
 $("speedbtn").onclick = () => fetch("/speedtest").then(poll);
 
+// Only new readings come down each time, so an open page (or a phone) costs almost nothing.
 async function poll() {
   try {
-    data = await (await fetch("/data")).json();
+    const d = await (await fetch(`/data?since=${Math.max(0, lastNow - 5)}&scan=${data?.last_scan ?? 0}`)).json();
+    if (d.devices == null) d.devices = data?.devices || [];
+    for (const [k, fresh] of Object.entries(d.series)) {
+      const s = series[k] ||= [], lastT = s.length ? s[s.length - 1][0] : 0;
+      for (const p of fresh) if (p[0] > lastT) s.push(p);
+      const cut = d.now - 3600;
+      while (s.length && s[0][0] < cut) s.shift();
+    }
+    lastNow = d.now; data = d;
     $("live").textContent = "live · updated " + new Date().toLocaleTimeString();
     render();
-  } catch { $("live").textContent = "lost contact with Heimdall — is it still running?"; }
+  } catch { $("live").textContent = "lost contact with Heimdall. Is it still running?"; }
 }
-poll(); setInterval(poll, 2000);
+const every = matchMedia("(max-width: 700px)").matches ? 5000 : 2000;
+poll(); setInterval(() => { if (!document.hidden) poll(); }, every);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 addEventListener("resize", render);
 </script>
 </body>
