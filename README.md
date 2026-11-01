@@ -296,7 +296,7 @@ VPN gives this machine, add that name to `allowed_hosts`.
 | `heimdall.local` doesn't open | Use the address it prints. Check `python3-dbus` is installed and avahi is running (`systemctl status avahi-daemon`). Some older Android phones don't support `.local` names |
 | Works on the machine, not from other devices | A firewall: run `./install.sh`, or allow the port yourself |
 | "Couldn't find your router" | The machine has no default route. Set `router` in `heimdall.toml` |
-| Devices show no maker | Install `ieee-data` |
+| Devices show no maker | Install `ieee-data`. If it is only newer gadgets, the list is out of date: run `sudo update-ieee-data`, then restart Heimdall |
 | Everything looks slow | Is Heimdall on wifi? Check the note under the verdict |
 
 ## How it works

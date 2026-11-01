@@ -170,11 +170,14 @@ KINDS = [(k["match"], k["kind"]) for k in EXTRA_KINDS] + [(r"nest-wifi-point|goo
 VENDOR_KINDS = [(r"nintendo|sony interactive|xbox", "Games console"), (r"daikin", "Appliance"), (r"sonos", "Sonos speaker"),
                 (r"brother|epson|canon", "Printer"), (r"espressif", "Smart-home gadget"), (r"microsoft|dell|lenovo|hewlett|asustek|giga-byte", "Computer")]
 VENDORS = {}  # first 3 bytes of a hardware address -> maker, from the IEEE list Ubuntu ships
-try:
-    with open("/usr/share/ieee-data/oui.txt", encoding="utf-8", errors="ignore") as f:
-        VENDORS = {m.group(1).replace("-", ":").lower(): m.group(2).strip() for line in f if (m := re.match(r"^([0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2})\s+\(hex\)\s+(.+)", line))}
-except OSError:
-    pass
+# `update-ieee-data` writes a fresh copy to /var/lib; the one in /usr/share is only as new as the package
+for path in ("/var/lib/ieee-data/oui.txt", "/usr/share/ieee-data/oui.txt"):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            VENDORS = {m.group(1).replace("-", ":").lower(): m.group(2).strip() for line in f if (m := re.match(r"^([0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2})\s+\(hex\)\s+(.+)", line))}
+        break
+    except OSError:
+        pass
 
 
 def vendor_of(mac):
@@ -230,6 +233,44 @@ def record(kind, value):
             last_ok[kind] = now
     append_log(LOG, [[time.strftime("%Y-%m-%d %H:%M:%S"), kind, "" if value is None else value]])
     tally(now, kind, value)
+
+
+def tail_rows(path, since):
+    """CSV rows of a log written after `since`, oldest first, reading only the end of the file
+    (and of the .old one when the current log is newer than that). Rows start with a local time stamp."""
+    def stamp(line):
+        try:
+            return time.mktime(time.strptime(line[:19], "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            return None
+    out = []
+    for p in (path, path + ".old"):
+        try:
+            with open(p, "rb") as f:
+                end = start = f.seek(0, 2)
+                lines = []
+                while start > 0:  # step back a megabyte at a time until the first whole line is older than `since`
+                    start = max(0, start - 1_000_000)
+                    f.seek(start)
+                    lines = f.read(end - start).decode("utf-8", "ignore").splitlines()[1 if start else 0:]  # drop a half line
+                    if lines and (stamp(lines[0]) or since) < since:
+                        break
+        except OSError:
+            continue
+        out = [r for r in csv.reader(lines) if r and (stamp(r[0]) or 0) >= since] + out
+        if lines and (stamp(lines[0]) or since) < since:
+            break  # this log already reaches back far enough
+    return out
+
+
+def load_recent():
+    """Refill the live charts with the last hour from the log, so a restart doesn't blank them."""
+    for r in tail_rows(LOG, time.time() - KEEP):
+        try:
+            t, v = time.mktime(time.strptime(r[0], "%Y-%m-%d %H:%M:%S")), float(r[2]) if r[2] else None
+        except (ValueError, IndexError):
+            continue
+        series.setdefault(r[1], deque()).append((t, v))  # last_ok is left alone: alerts start afresh
 
 
 def add_event(e):
@@ -1533,6 +1574,7 @@ if __name__ == "__main__":
         for f in rep["findings"]:
             print(f"- {f['text']}")
         raise SystemExit
+    load_recent()  # before any checks start, so new readings land after the reloaded ones
     try:
         with open(SAVED) as f:
             saved = json.load(f)
