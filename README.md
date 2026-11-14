@@ -83,6 +83,9 @@ and outside the range your router hands out:
 ./install.sh --address 192.168.1.10
 ```
 
+Heimdall checks that address every minute while it runs and puts it back if it
+has gone, which happens when an update restarts the machine's network software.
+
 ### Where to run it
 
 Use a machine plugged into the router by cable: a spare laptop, a mini PC or a
@@ -293,7 +296,7 @@ VPN gives this machine, add that name to `allowed_hosts`.
 
 | Problem | Try |
 |---|---|
-| `heimdall.local` doesn't open | Use the address it prints. Check `python3-dbus` is installed and avahi is running (`systemctl status avahi-daemon`). Some older Android phones don't support `.local` names |
+| `heimdall.local` doesn't open | Use the address it prints. If you gave it its own address and last installed before the every-minute check was added, run `./install.sh` again. Check `python3-dbus` is installed and avahi is running (`systemctl status avahi-daemon`). Some older Android phones don't support `.local` names |
 | Works on the machine, not from other devices | A firewall: run `./install.sh`, or allow the port yourself |
 | "Couldn't find your router" | The machine has no default route. Set `router` in `heimdall.toml` |
 | Devices show no maker | Install `ieee-data`. If it is only newer gadgets, the list is out of date: run `sudo update-ieee-data`, then restart Heimdall |

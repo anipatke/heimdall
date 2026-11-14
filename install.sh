@@ -11,11 +11,12 @@
 # Heimdall runs as its own user, heimdall, not as you or root. Its code is copied to /opt/heimdall
 # (read-only to it: run this again after a git pull to update) and it keeps its logs and settings in
 # /var/lib/heimdall. sudo is used to set that up, and with --address to add that address and send its
-# port 80 to Heimdall each time the service starts.
+# port 80 to Heimdall when the service starts, and to put them back if they go while it runs.
 set -eu
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 UNIT=/etc/systemd/system/heimdall.service
+KEEP=/etc/systemd/system/heimdall-address   # .service and .timer: with --address, puts the address back if it goes
 APP=/opt/heimdall          # code: owned by root, so the service can't change what it runs
 DATA=/var/lib/heimdall     # logs, state, trends and heimdall.toml: owned by the heimdall user
 ME=$(id -un)
@@ -26,8 +27,9 @@ KEY_FILE=/etc/heimdall/anthropic_key   # root-only at rest; systemd hands it to 
 while [ $# -gt 0 ]; do
   case "$1" in
     --uninstall)
+      sudo systemctl disable --now heimdall-address.timer 2>/dev/null || true
       sudo systemctl disable --now heimdall 2>/dev/null || true
-      sudo rm -f "$UNIT" && sudo systemctl daemon-reload
+      sudo rm -f "$UNIT" "$KEEP.service" "$KEEP.timer" && sudo systemctl daemon-reload
       echo "Heimdall service removed. Its logs and settings are kept in $DATA, the code in $APP;"
       echo "delete them with: sudo rm -rf $DATA $APP && sudo userdel heimdall"
       exit 0 ;;
@@ -123,9 +125,11 @@ if [ -n "$ADDRESS" ]; then
     echo "$ADDRESS is already in use by another device. Pick a free one, outside your router's handout range."; exit 1
   fi
   NAT="-d $ADDRESS -p tcp --dport 80 -j REDIRECT --to-ports $PORT"
+  # safe to repeat: only adds what's missing
+  ENSURE="ip -4 -o addr show dev $DEV to $ADDRESS/32 | grep -q inet || ip addr replace $ADDRESS/$PREFIX dev $DEV; for c in PREROUTING OUTPUT; do iptables -t nat -C \$c $NAT 2>/dev/null || iptables -t nat -A \$c $NAT; done"
   # "+" runs these as root even though Heimdall itself runs as the heimdall user
   EXTRA="Environment=MDNS_IP=$ADDRESS
-ExecStartPre=+/bin/sh -c 'ip addr replace $ADDRESS/$PREFIX dev $DEV; for c in PREROUTING OUTPUT; do iptables -t nat -C \$c $NAT 2>/dev/null || iptables -t nat -A \$c $NAT; done'
+ExecStartPre=+/bin/sh -c '$ENSURE'
 ExecStopPost=+/bin/sh -c 'for c in PREROUTING OUTPUT; do iptables -t nat -D \$c $NAT 2>/dev/null; done; ip addr del $ADDRESS/$PREFIX dev $DEV 2>/dev/null; true'"
 fi
 
@@ -173,6 +177,36 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# The network software drops an address it didn't set when it restarts, as updates make it do, and
+# Heimdall would carry on announcing an address nothing answers on. So check every minute, for as
+# long as Heimdall runs: the timer starts and stops with it, so a stopped Heimdall stays stopped.
+if [ -n "$ADDRESS" ]; then
+  sudo tee "$KEEP.service" >/dev/null <<EOF
+[Unit]
+Description=Put back Heimdall's own address if it has gone
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '$ENSURE'
+# a line in the system log every minute would say nothing; failures still show
+LogLevelMax=notice
+EOF
+  sudo tee "$KEEP.timer" >/dev/null <<EOF
+[Unit]
+Description=Check Heimdall's own address every minute
+BindsTo=heimdall.service
+After=heimdall.service
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=heimdall.service
+EOF
+fi
+
 # let devices at home through the firewall, if ufw is on (nothing from outside your network)
 if sudo ufw status 2>/dev/null | grep -q "Status: active"; then
   NETWORK=$(ip -4 route show dev "$DEV" scope link | awk 'NR==1{print $1}')
@@ -183,6 +217,7 @@ sudo systemctl daemon-reload
 # restart, not just start: on a re-run the old settings would otherwise keep running
 sudo systemctl enable heimdall
 sudo systemctl restart heimdall
+[ -z "$ADDRESS" ] || sudo systemctl enable --now heimdall-address.timer
 sleep 2
 systemctl --no-pager --lines=0 status heimdall | head -3
 echo
