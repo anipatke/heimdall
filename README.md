@@ -83,6 +83,9 @@ and outside the range your router hands out:
 ./install.sh --address 192.168.1.10
 ```
 
+Heimdall checks that address every minute while it runs and puts it back if it
+has gone, which happens when an update restarts the machine's network software.
+
 ### Where to run it
 
 Use a machine plugged into the router by cable: a spare laptop, a mini PC or a
@@ -293,7 +296,7 @@ VPN gives this machine, add that name to `allowed_hosts`.
 
 | Problem | Try |
 |---|---|
-| `heimdall.local` doesn't open | Use the address it prints. Check `python3-dbus` is installed and avahi is running (`systemctl status avahi-daemon`). Some older Android phones don't support `.local` names |
+| `heimdall.local` doesn't open | Use the address it prints. If you gave it its own address and last installed before the every-minute check was added, run `./install.sh` again. Check `python3-dbus` is installed and avahi is running (`systemctl status avahi-daemon`). Some older Android phones don't support `.local` names |
 | Works on the machine, not from other devices | A firewall: run `./install.sh`, or allow the port yourself |
 | "Couldn't find your router" | The machine has no default route. Set `router` in `heimdall.toml` |
 | Devices show no maker | Install `ieee-data`. If it is only newer gadgets, the list is out of date: run `sudo update-ieee-data`, then restart Heimdall |
@@ -315,7 +318,11 @@ Common things to change when forking:
 - **Device types**: `KINDS` and `VENDOR_KINDS` near the top of `server.py` map
   network names and makers to types
 - **Other mesh systems**: `mesh_loop` reads each Google / Nest unit's local
-  `/api/v1/status` page. Another router's status page could be read there in the same way
+  `/api/v1/status` page. Another router's status page could be read there in the same way.
+  `mesh_track` writes every restart (timed from the unit's own uptime), software change, cable change and
+  loss of internet to `mesh.csv`, kept for good; `/mesh` and the **Mesh** tab turn it into restart episodes,
+  time-of-day patterns and per-unit counts. On first start it is seeded with the restarts already in the
+  trends, marked approximate
 - **What counts as slow**: `EDITABLE` in `server.py` holds every setting's default
   and allowed range. The page reads the thresholds from the server, so the
   dashboard and alerts always agree

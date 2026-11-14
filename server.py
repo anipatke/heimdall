@@ -1321,7 +1321,178 @@ def mesh_loop():
                             "version": sw.get("softwareVersion"), "update": sw.get("updateRequired") or sw.get("updateStatus") not in (None, "idle"),
                             "online": wan.get("online") if sysinfo.get("groupRole") == "root" else None,
                             "upstream": wan.get("gatewayIpAddress") if sysinfo.get("groupRole") == "root" else None}
+            ver, online, wired = sw.get("softwareVersion"), wan.get("online"), sysinfo.get("lan0Link")
+            mesh_track(ip, now, up, ver if isinstance(ver, str) and ver else None,
+                       online if isinstance(online, bool) and sysinfo.get("groupRole") == "root" else None,
+                       wired if isinstance(wired, bool) else None)
         time.sleep(MESH_EVERY)
+
+
+# ---- Mesh history: each restart, software change, wired-link change and loss of internet of the router and wifi
+# points, kept for good in mesh.csv (a few rows a day). A restart's time comes from the unit's own uptime, so it is
+# right even when Heimdall only sees the unit again once it is back. The Mesh view turns this into patterns.
+# Rows: unix time, local time, address, what (seen | restarted | software | internet | wired), details as JSON.
+MESH_LOG = os.path.join(DATA, "mesh.csv")
+MESH_MODELS = {"MISTRAL": "Nest Wifi router (2019)", "VENTO": "Nest Wifi point (2019)", "ACc3d": "Google Wifi (2016)",
+               "GALE": "Google Wifi (2016)", "ONHUB": "OnHub"}
+EPISODE_GAP = 15 * 60   # restarts closer together than this are one episode
+BOOT_SLACK = 120        # a unit's boot time (now - uptime) moving later by more than this means it restarted
+mesh_last = {}          # address -> last known {boot, version, online, wired, at}; used by mesh_loop only
+mesh_seen = set()       # units read since Heimdall started (each gets one "seen" row with its state)
+
+
+def mesh_note(t, ip, what, detail):
+    append_log(MESH_LOG, [[int(t), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), ip, what,
+                           json.dumps(detail, separators=(",", ":"))]])
+
+
+def mesh_rows():
+    rows = []
+    try:
+        with open(MESH_LOG, newline="") as f:
+            for r in csv.reader(f):
+                try:
+                    d = json.loads(r[4]) if r[4] else {}
+                    rows.append({"t": int(r[0]), "ip": r[2], "what": r[3], "d": d if isinstance(d, dict) else {}})
+                except (ValueError, IndexError):
+                    continue
+    except OSError:
+        pass
+    return rows
+
+
+def mesh_load():
+    """Each unit's last known state, so a restart or update while Heimdall was off still shows up. The first time,
+    start the history with the restarts Heimdall had already noticed (timed when noticed, so marked approximate)."""
+    if not os.path.exists(MESH_LOG):
+        with trend_lock:
+            old = [e for e in trends["events"] if e[1] == "restarted"]
+        for e in old:
+            mesh_note(e[0], e[2], "restarted", {"approx": True})
+        open(MESH_LOG, "a").close()
+        return
+    for r in mesh_rows():
+        k, d = mesh_last.setdefault(r["ip"], {}), r["d"]
+        if r["what"] == "seen":
+            k.update({x: d[x] for x in ("boot", "version", "online", "wired") if d.get(x) is not None})
+        elif r["what"] == "restarted" and not d.get("approx"):
+            k["boot"] = r["t"]
+        elif r["what"] == "software":
+            k["version"] = d.get("to")
+        elif r["what"] in ("internet", "wired"):
+            k[r["what"] if r["what"] == "wired" else "online"] = d.get(r["what"] if r["what"] == "wired" else "online")
+
+
+def mesh_track(ip, now, up, version, online, wired):
+    """Compare one reading of a unit with what we last knew, and write down anything that changed."""
+    boot = round(now - up) if up is not None else None
+    k = mesh_last.get(ip)
+    if k:
+        if boot is not None and k.get("boot") is not None and boot - k["boot"] > BOOT_SLACK:
+            was = round(k["at"] - k["boot"]) if k.get("at") else None
+            mesh_note(boot, ip, "restarted", {"was_up": was, "seen": round(now)})
+        if version and k.get("version") and version != k["version"]:
+            mesh_note(now, ip, "software", {"from": k["version"], "to": version})
+        if online is not None and k.get("online") is not None and online != k["online"]:
+            mesh_note(now, ip, "internet", {"online": online})
+        if wired is not None and k.get("wired") is not None and wired != k["wired"]:
+            mesh_note(now, ip, "wired", {"wired": wired})
+    k = mesh_last.setdefault(ip, {})
+    k.update({x: v for x, v in (("boot", boot), ("version", version), ("online", online), ("wired", wired)) if v is not None})
+    k["at"] = now
+    if ip not in mesh_seen:
+        mesh_seen.add(ip)
+        mesh_note(now, ip, "seen", {"boot": boot, "version": version, "online": online, "wired": wired})
+
+
+def mesh_report(days):
+    """Restart episodes, when they happen, which units, and whether an update or lost internet came with them."""
+    now = time.time()
+    since = now - days * 86400
+    rows = mesh_rows()
+    starts = [r["t"] for r in rows]
+    first = min(starts) if starts else None
+    tracked = min((r["t"] for r in rows if r["what"] == "seen"), default=None)  # exact times and updates from here
+    rs = sorted((r for r in rows if r["what"] == "restarted" and r["t"] >= since), key=lambda r: r["t"])
+    eps = []
+    for r in rs:
+        if eps and r["t"] - eps[-1]["end"] <= EPISODE_GAP:
+            e = eps[-1]
+            e["end"] = r["t"]
+        else:
+            e = {"start": r["t"], "end": r["t"], "units": [], "approx": False}
+            eps.append(e)
+        if r["ip"] not in e["units"]:
+            e["units"].append(r["ip"])
+        e["approx"] = e["approx"] or bool(r["d"].get("approx"))
+    known = sorted({ROUTER, *point_list(), *(r["ip"] for r in rows)}, key=lambda ip: (ip != ROUTER, ipaddress.ip_address(ip)))
+    n = len(known)
+    soft = [r for r in rows if r["what"] == "software"]
+    lost = [r for r in rows if r["what"] == "internet" and r["d"].get("online") is False]
+    for e in eps:
+        u = set(e["units"])
+        e["kind"] = "whole" if n > 2 and len(u) >= n - 1 else "router" if u == {ROUTER} else "some"
+        near = lambda r: e["start"] - 1800 <= r["t"] <= e["end"] + 1800
+        e["software"] = [{"ip": r["ip"], "to": r["d"].get("to")} for r in soft if near(r)]
+        e["internet_lost"] = any(near(r) for r in lost)
+    hours = [0] * 24
+    for e in eps:
+        hours[time.localtime(e["start"]).tm_hour] += 1
+    with lock:
+        live = {ip: dict(u) for ip, u in mesh.items()}
+    units = []
+    for ip in known:
+        mine = [r["t"] for r in rs if r["ip"] == ip]
+        u = live.get(ip, {})
+        units.append({"ip": ip, "name": unit_name(ip).removeprefix("The ").capitalize() if ip == ROUTER else point_label(ip),
+                      "model": MESH_MODELS.get(u.get("model") or "", u.get("model")), "version": u.get("version"),
+                      "uptime": u.get("uptime"), "wired": u.get("wired"), "restarts": len(mine),
+                      "last": max(mine) if mine else None, "seen": bool(u)})
+    span = min(days, (now - first) / 86400) if first else 0
+    changes = [r for r in rows if r["what"] != "seen" and r["t"] >= since][-60:][::-1]
+    return {"now": now, "days": days, "span_days": span, "first": first, "tracked": tracked, "router": ROUTER,
+            "units": units, "episodes": eps, "hours": hours, "changes": changes, "names": NAMES,
+            "restarts": [{"t": r["t"], "ip": r["ip"], "approx": bool(r["d"].get("approx"))} for r in rs],
+            "software": [{"t": r["t"], "ip": r["ip"], **r["d"]} for r in soft if r["t"] >= since],
+            "internet": [{"t": r["t"], "online": r["d"].get("online")} for r in rows if r["what"] == "internet" and r["t"] >= since],
+            "findings": mesh_findings(eps, units, span, tracked, hours)}
+
+
+def mesh_findings(eps, units, span, tracked, hours):
+    """Plain sentences about the pattern. They say what happened, not why: the units don't say why they restart."""
+    out, n = [], len(eps)
+    day = lambda t: time.strftime("%a %-d %b", time.localtime(t))
+    if not n:
+        return [f"No restarts in the last {max(1, round(span))} days."] if span else ["Nothing recorded yet."]
+    every = span / n if n else 0
+    out.append(f"{plural(n, 'restart episode')} in {max(1, round(span))} days" + (f", about one every {round(every, 1):g} days." if every >= 1 else f", about {round(n / max(span, 1 / 24)):g} a day."))
+    k = {x: sum(e["kind"] == x for e in eps) for x in ("whole", "router", "some")}
+    parts = [f"the whole mesh together {plural(k['whole'], 'time')}" if k["whole"] else "",
+             f"the router alone {plural(k['router'], 'time')}" if k["router"] else "",
+             f"some points without the rest {plural(k['some'], 'time')}" if k["some"] else ""]
+    parts = [p for p in parts if p]
+    out.append("Restarted: " + ", ".join(parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1] + ".")
+    if n >= 4:
+        best = max(range(24), key=lambda h: sum(hours[(h + i) % 24] for i in range(4)))
+        c = sum(hours[(best + i) % 24] for i in range(4))
+        if c / n >= 0.5:
+            out.append(f"{c} of {n} began between {best:02d}:00 and {(best + 4) % 24:02d}:00.")
+    worst = max(units, key=lambda u: u["restarts"])
+    if worst["restarts"]:
+        out.append(f"Most restarts: {worst['name']} ({worst['restarts']}).")
+    if tracked:
+        later = [e for e in eps if e["start"] >= tracked]
+        if later:
+            w = sum(bool(e["software"]) for e in later)
+            out.append(f"Since {day(tracked)}, {w} of {len(later)} came with a software update" + (" (Google updating the mesh)." if w else ", so updates don't explain them."))
+            i = sum(e["internet_lost"] for e in later)
+            if i:
+                out.append(f"The router lost its internet connection around {i} of {len(later)}.")
+        else:
+            out.append(f"Exact restart times and software updates are recorded from {day(tracked)}; no restart since then yet.")
+    if any(e["approx"] for e in eps):
+        out.append("Restarts before exact tracking began are timed when Heimdall noticed them, which can be minutes late.")
+    return out
 
 
 def speed_test():
@@ -1500,6 +1671,9 @@ class Handler(BaseHTTPRequestHandler):
                 e = dict(ai_entry(days))
             rep["ai"] = {"on": bool(AI_KEY), "model": AI_MODEL, "effort": AI_EFFORT, "running": days in ai_running, "next_at": ai_next(days), **e}
             self.send(json.dumps(rep, separators=(",", ":")).encode(), "application/json")
+        elif url.path == "/mesh":
+            days = {"7": 7, "30": 30, "90": 90}.get((parse_qs(url.query).get("days") or ["14"])[0], 14)
+            self.send(json.dumps(mesh_report(days), separators=(",", ":")).encode(), "application/json")
         elif url.path == "/settings":
             self.send(json.dumps({
                 "values": {s: {k: conf(s, k) for s2, k in EDITABLE if s2 == s} for s, _ in EDITABLE},
@@ -1591,6 +1765,7 @@ if __name__ == "__main__":
     except (OSError, ValueError, KeyError):
         pass
     load_trends()
+    mesh_load()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # systemd stopping us: save trends on the way out
     for n, h in TARGETS.items():
         forever(pinger, n, h)
