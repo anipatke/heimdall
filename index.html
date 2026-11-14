@@ -121,6 +121,9 @@
   #settings .bar .msg { margin-right: auto; font-size: 13px; }
   .err { color: var(--critical); }
   .tabs { display: inline-flex; gap: 4px; }
+  .mfind { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; color: var(--text-secondary); }
+  .changes { display: grid; gap: 6px; font-size: 13px; max-height: 320px; overflow-y: auto; }
+  .changes div span { color: var(--text-muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
   .findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
   .findings li { display: grid; grid-template-columns: 62px 1fr; gap: 10px; align-items: baseline; font-size: 13px; color: var(--text-secondary); }
   .report { font-size: 14px; color: var(--text-secondary); }
@@ -146,6 +149,7 @@
       <button data-view="live" aria-pressed="true">Live</button>
       <button data-view="day" aria-pressed="false">Last 24 h</button>
       <button data-view="week" aria-pressed="false">Last 7 days</button>
+      <button data-view="mesh" aria-pressed="false">Mesh</button>
     </nav>
     <span class="live" id="live">connecting…</span>
     <button id="openSettings" aria-haspopup="dialog">⚙ Settings</button>
@@ -237,6 +241,27 @@
       <section class="card"><h3>Worst moments</h3><div id="tMoments" class="sub"></div></section>
       <section class="card"><h3>Devices</h3><div id="tDevs" class="sub"></div></section>
     </div>
+  </div>
+
+  <div id="meshView" hidden>
+    <section class="card">
+      <div class="controls"><h2 id="mHeadline" style="font-size:17px">Working it out…</h2>
+        <button data-md="7" aria-pressed="false">7 days</button><button data-md="14" aria-pressed="true">14 days</button>
+        <button data-md="30" aria-pressed="false">30 days</button><button data-md="90" aria-pressed="false">90 days</button></div>
+      <ul class="mfind" id="mFindings"></ul>
+    </section>
+    <section class="card">
+      <div class="controls"><h2>Restarts, by unit</h2></div>
+      <div class="legend" id="mLegend"></div>
+      <div class="chartwrap"><svg id="mTimeline" role="img" aria-label="Each restart of the router and wifi points over time"></svg><div class="tip"></div></div>
+    </section>
+    <div class="grid2">
+      <section class="card"><h3>What time restarts begin</h3>
+        <div class="chartwrap"><svg id="mHours" style="height:180px" role="img" aria-label="Restart episodes by hour of the day"></svg><div class="tip"></div></div></section>
+      <section class="card"><h3>Changes, newest first</h3><div id="mChanges" class="changes"></div></section>
+    </div>
+    <section class="card"><h3>Each unit</h3><div style="overflow-x:auto"><table id="mUnits"></table></div>
+      <p class="muted" style="margin:8px 0 0;font-size:12px">Read once a minute from each unit's own status page. Google's units say when they restarted and what software they run, but not why.</p></section>
   </div>
 </main>
 <script>
@@ -641,13 +666,16 @@ const pc = v => v == null ? "–" : v < 0.05 ? "0%" : v < 10 ? `${v.toFixed(1)}%
 const tName = ip => esc(trend.names?.[ip] || `Wifi point .${ip.split(".").pop()}`);
 
 function showView(v) {
-  view = ["day", "week"].includes(v) ? v : "live";
+  view = ["day", "week", "mesh"].includes(v) ? v : "live";
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === view));
   $("liveView").hidden = view !== "live";
-  $("trendView").hidden = view === "live";
+  $("trendView").hidden = !["day", "week"].includes(view);
+  $("meshView").hidden = view !== "mesh";
   if (location.hash.slice(1) !== (view === "live" ? "" : view)) history.replaceState(null, "", view === "live" ? location.pathname : `#${view}`);
   clearTimeout(trendTimer);
+  clearTimeout(meshTimer);
   if (view === "live") return render();
+  if (view === "mesh") return loadMesh();
   trend = null;
   $("tHeadline").textContent = "Working it out…";
   loadTrend();
@@ -662,7 +690,7 @@ document.querySelectorAll("[data-tm]").forEach(b => b.onclick = () => {
 
 async function loadTrend() {
   clearTimeout(trendTimer);
-  if (view === "live") return;
+  if (!["day", "week"].includes(view)) return;
   const days = view === "week" ? 7 : 1;
   try {
     const r = await (await fetch(`/trends?days=${days}`)).json();
@@ -704,7 +732,7 @@ function renderAi() {
 }
 
 function renderTrend() {
-  if (!trend || view === "live") return;
+  if (!trend || !["day", "week"].includes(view)) return;
   const r = trend, days = r.days;
   $("tHeadline").textContent = r.headline;
   $("tFindings").innerHTML = r.findings.map(f => `<li>${badge(f.l).replace("Offline", "Note")}<span>${esc(f.text)}</span></li>`).join("");
@@ -719,7 +747,7 @@ function renderTrend() {
 }
 
 // Hover any mark with data-tip (bars, cells, hour columns) for its details.
-document.querySelectorAll("#trendView .chartwrap").forEach(w => {
+document.querySelectorAll("#trendView .chartwrap, #meshView .chartwrap").forEach(w => {
   w.addEventListener("mousemove", e => {
     const t = e.target.closest("[data-tip]"), tip = w.querySelector(".tip");
     if (!t) return (tip.style.display = "none");
@@ -902,7 +930,108 @@ async function poll() {
 const every = matchMedia("(max-width: 700px)").matches ? 5000 : 2000;
 poll(); setInterval(() => { if (!document.hidden) poll(); }, every);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
-addEventListener("resize", () => view === "live" ? render() : renderTrend());
+addEventListener("resize", () => view === "live" ? render() : view === "mesh" ? renderMeshView() : renderTrend());
+// ---- Mesh view: restarts, software updates and lost internet of the router and wifi points, from /mesh
+let mesh2 = null, meshDays = 14, meshTimer = null;
+const dayTime = t => `${new Date(t * 1000).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${hhmm(t)}`;
+const longDur = s => s == null ? "–" : s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.floor(s % 86400 / 3600)} h` : durTxt(s);
+const mName = ip => esc(mesh2.units.find(u => u.ip === ip)?.name || ip);
+async function loadMesh() {
+  clearTimeout(meshTimer);
+  if (view !== "mesh") return;
+  try {
+    const r = await (await fetch(`/mesh?days=${meshDays}`)).json();
+    if (view !== "mesh") return;
+    mesh2 = r;
+    renderMeshView();
+  } catch { $("mHeadline").textContent = "Couldn't read the mesh history. Retrying…"; }
+  meshTimer = setTimeout(loadMesh, 60000);
+}
+document.querySelectorAll("[data-md]").forEach(b => b.onclick = () => {
+  meshDays = +b.dataset.md;
+  document.querySelectorAll("[data-md]").forEach(o => o.setAttribute("aria-pressed", o === b));
+  loadMesh();
+});
+function renderMeshView() {
+  const r = mesh2;
+  if (!r || view !== "mesh") return;
+  const n = r.episodes.length;
+  $("mHeadline").textContent = n ? `${n} restart episode${n === 1 ? "" : "s"} in the last ${r.days} days` : `No restarts in the last ${r.days} days`;
+  $("mFindings").innerHTML = r.findings.slice(n ? 1 : 0).map(f => `<li>${esc(f)}</li>`).join("") || "<li>Nothing more to say yet.</li>";
+  meshTimeline(r); meshHours(r); meshChanges(r); meshUnits(r);
+}
+function meshTimeline(r) {
+  const units = r.units, short = u => u.name.replace(/ wifi point$/, "");
+  const svg = $("mTimeline"), W = svg.clientWidth, rh = 30;
+  const m = { l: Math.min(W * 0.35, 16 + 7 * Math.max(...units.map(u => short(u).length))), r: 12, t: 8, b: 24 };
+  const H = m.t + units.length * rh + m.b, t0 = r.now - r.days * 86400;
+  svg.style.height = H + "px";
+  const x = t => m.l + (t - t0) / (r.now - t0) * (W - m.l - m.r), row = ip => units.findIndex(u => u.ip === ip);
+  const yc = i => m.t + i * rh + rh / 2, tip = s => `data-tip='${s.replace(/'/g, "&#39;")}'`;
+  let g = "";
+  const step = r.days <= 14 ? 1 : r.days <= 30 ? 7 : 14;   // a line each day, or each week or fortnight
+  const d0 = new Date(t0 * 1000); d0.setHours(0, 0, 0, 0);
+  let lastLabel = -Infinity;  // dates at least 48 px apart, so they never overlap on a phone
+  for (let d = new Date(d0), i = 0; d.getTime() / 1000 <= r.now; d.setDate(d.getDate() + 1), i++) {
+    const t = d.getTime() / 1000;
+    if (t < t0 || i % step) continue;
+    g += `<line x1="${x(t)}" x2="${x(t)}" y1="${m.t}" y2="${H - m.b}" stroke="var(--grid)"/>`;
+    if (x(t) - lastLabel >= 48 && x(t) + 40 <= W && (lastLabel = x(t))) g += `<text x="${x(t) + 3}" y="${H - 8}" font-size="11" fill="var(--text-muted)">${d.toLocaleDateString([], { day: "numeric", month: "short" })}</text>`;
+  }
+  units.forEach((u, i) => g += `<text x="${m.l - 8}" y="${yc(i) + 4}" text-anchor="end" font-size="12" fill="var(--text-secondary)">${esc(short(u))}</text>`
+    + `<line x1="${m.l}" x2="${W - m.r}" y1="${yc(i)}" y2="${yc(i)}" stroke="var(--border)" stroke-dasharray="2 3"/>`);
+  for (const e of r.episodes) {  // a band across every unit for each episode
+    const a = x(e.start) - 3, b = Math.max(x(e.end) + 3, a + 6);
+    const what = e.kind === "whole" ? "The whole mesh" : e.kind === "router" ? "The router alone" : `${e.units.length} of ${units.length} units`;
+    g += `<rect x="${a}" y="${m.t}" width="${b - a}" height="${H - m.t - m.b}" fill="var(--critical)" opacity=".10" ${tip(`<div style="color:var(--text-secondary)">${dayTime(e.start)}</div><div><b>${what}</b> restarted</div><div>${e.units.map(mName).join(", ")}</div>${e.software.length ? "<div>With a software update</div>" : ""}${e.internet_lost ? "<div>Router lost internet around then</div>" : ""}${e.approx ? '<div class="muted">Time approximate</div>' : ""}`)}/>`;
+  }
+  for (const s of r.software) {
+    const i = row(s.ip); if (i < 0) continue;
+    const cx = x(s.t), cy = yc(i);
+    g += `<path d="M${cx} ${cy - 7}L${cx + 7} ${cy}L${cx} ${cy + 7}L${cx - 7} ${cy}Z" fill="var(--series-4)" ${tip(`<div>${dayTime(s.t)}</div><div>${mName(s.ip)}: software ${esc(s.from)} → ${esc(s.to)}</div>`)}/>`;
+  }
+  for (const s of r.internet) {
+    const i = row(r.router); if (i < 0) continue;
+    g += `<path d="M${x(s.t)} ${yc(i) - 8}l6 10h-12z" fill="var(--series-2)" ${tip(`<div>${dayTime(s.t)}</div><div>Router ${s.online ? "got its internet back" : "lost its internet connection"}</div>`)}/>`;
+  }
+  for (const s of r.restarts) {
+    const i = row(s.ip); if (i < 0) continue;
+    g += `<circle cx="${x(s.t)}" cy="${yc(i)}" r="5" fill="${s.approx ? "var(--surface-1)" : "var(--critical)"}" stroke="var(--critical)" stroke-width="2" ${tip(`<div>${dayTime(s.t)}</div><div>${mName(s.ip)} restarted</div>${s.approx ? '<div class="muted">Time approximate (when Heimdall noticed)</div>' : ""}`)}/>`;
+  }
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+  $("mLegend").innerHTML = `<span style="--c:var(--critical)">Restart</span><span style="--c:var(--series-4)">Software update</span><span style="--c:var(--series-2)">Router lost internet</span><span style="--c:color-mix(in oklab, var(--critical) 25%, var(--surface-1))">Episode (restarts within 15 min)</span>`;
+}
+function meshHours(r) {
+  const svg = $("mHours"), W = svg.clientWidth, H = 180, m = { l: 28, r: 8, t: 8, b: 22 }, bw = (W - m.l - m.r) / 24;
+  const top = Math.max(2, ...r.hours), y = v => m.t + (1 - v / top) * (H - m.t - m.b);
+  let g = "";
+  for (let v = 0; v <= top; v += Math.max(1, Math.ceil(top / 4))) g += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted)">${v}</text>`;
+  r.hours.forEach((c, h) => {
+    const xx = m.l + h * bw;
+    if (h % 3 === 0) g += `<text x="${xx + bw / 2}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${String(h).padStart(2, "0")}</text>`;
+    if (c) g += `<rect x="${xx + 2}" y="${y(c)}" width="${Math.max(2, bw - 4)}" height="${y(0) - y(c)}" rx="2" fill="var(--critical)"/>`;
+    g += `<rect x="${xx}" y="${m.t}" width="${bw}" height="${H - m.t - m.b}" fill="transparent" data-tip='<div>${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00</div><div><b>${c}</b> episode${c === 1 ? "" : "s"} began</div>'/>`;
+  });
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+}
+function meshChanges(r) {
+  const say = c => {
+    const who = mName(c.ip), d = c.d || {};
+    if (c.what === "restarted") return `${who} restarted${d.was_up ? ` (had been up ${longDur(d.was_up)})` : ""}${d.approx ? " · time approximate" : ""}`;
+    if (c.what === "software") return `${who} updated its software: ${esc(d.from)} → ${esc(d.to)}`;
+    if (c.what === "internet") return d.online ? "Router got its internet back" : "<b>Router lost its internet connection</b>";
+    if (c.what === "wired") return `${who} ${d.wired ? "is now plugged in by cable" : "lost its cable connection"}`;
+    return `${who}: ${esc(c.what)}`;
+  };
+  $("mChanges").innerHTML = r.changes.length ? r.changes.map(c => `<div><span>${dayTime(c.t)}</span>${say(c)}</div>`).join("") : '<span class="muted">Nothing changed in this period.</span>';
+}
+function meshUnits(r) {
+  $("mUnits").innerHTML = `<tr><th>Unit</th><th>Model</th><th>Software</th><th>Up for</th><th>Cable</th><th>Restarts</th><th>Last restart</th></tr>`
+    + r.units.map(u => `<tr><td>${esc(u.name)}<span class="kind">${esc(u.ip)}</span></td><td>${esc(u.model || "–")}</td><td>${esc(u.version || "–")}</td>
+      <td>${u.seen ? longDur(u.uptime) : '<span class="muted">not answering</span>'}</td><td>${u.wired == null ? "–" : u.wired ? "Yes" : "No"}</td>
+      <td>${u.restarts}</td><td>${u.last ? dayTime(u.last) : "–"}</td></tr>`).join("");
+}
+
 showView(location.hash.slice(1));
 </script>
 </body>

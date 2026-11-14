@@ -318,7 +318,11 @@ Common things to change when forking:
 - **Device types**: `KINDS` and `VENDOR_KINDS` near the top of `server.py` map
   network names and makers to types
 - **Other mesh systems**: `mesh_loop` reads each Google / Nest unit's local
-  `/api/v1/status` page. Another router's status page could be read there in the same way
+  `/api/v1/status` page. Another router's status page could be read there in the same way.
+  `mesh_track` writes every restart (timed from the unit's own uptime), software change, cable change and
+  loss of internet to `mesh.csv`, kept for good; `/mesh` and the **Mesh** tab turn it into restart episodes,
+  time-of-day patterns and per-unit counts. On first start it is seeded with the restarts already in the
+  trends, marked approximate
 - **What counts as slow**: `EDITABLE` in `server.py` holds every setting's default
   and allowed range. The page reads the thresholds from the server, so the
   dashboard and alerts always agree
